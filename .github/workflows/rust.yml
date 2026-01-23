@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "codex/create-cli-operating-system-in-rust" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "codex/create-cli-operating-system-in-rust" ]
 
 env:
   CARGO_TERM_COLOR: always
