@@ -544,6 +544,106 @@ mod storage {
     }
 }
 
+mod time {
+    use core::sync::atomic::{AtomicI8, Ordering};
+
+    use heapless::String;
+    use x86_64::instructions::port::Port;
+
+    static TZ_OFFSET: AtomicI8 = AtomicI8::new(0);
+
+    pub fn set_timezone(offset: &str) -> Result<(), ()> {
+        let offset = offset.trim();
+        let (sign, digits) = if let Some(rest) = offset.strip_prefix('+') {
+            (1i8, rest)
+        } else if let Some(rest) = offset.strip_prefix('-') {
+            (-1i8, rest)
+        } else {
+            (1i8, offset)
+        };
+        let hours: i8 = digits.parse().map_err(|_| ())?;
+        if hours.abs() > 12 {
+            return Err(());
+        }
+        TZ_OFFSET.store(hours * sign, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn timezone_offset() -> String<8> {
+        let offset = TZ_OFFSET.load(Ordering::SeqCst);
+        let mut out = String::<8>::new();
+        if offset >= 0 {
+            let _ = out.push('+');
+        } else {
+            let _ = out.push('-');
+        }
+        let value = offset.unsigned_abs();
+        let _ = push_two(&mut out, value);
+        out
+    }
+
+    pub fn formatted_times() -> (String<32>, String<32>) {
+        let (mut hour, minute, second) = read_rtc();
+        let gmt = format_time("GMT", hour, minute, second);
+
+        let offset = TZ_OFFSET.load(Ordering::SeqCst) as i16;
+        hour = ((hour as i16 + offset + 24) % 24) as u8;
+        let local_label = timezone_offset();
+        let local = format_time(local_label.as_str(), hour, minute, second);
+        (gmt, local)
+    }
+
+    fn format_time(label: &str, hour: u8, minute: u8, second: u8) -> String<32> {
+        let mut out = String::<32>::new();
+        let _ = out.push_str(label);
+        let _ = out.push_str(" ");
+        let _ = push_two(&mut out, hour);
+        let _ = out.push(':');
+        let _ = push_two(&mut out, minute);
+        let _ = out.push(':');
+        let _ = push_two(&mut out, second);
+        out
+    }
+
+    fn push_two<const N: usize>(out: &mut String<N>, value: u8) -> Result<(), ()> {
+        let tens = value / 10;
+        let ones = value % 10;
+        out.push((b'0' + tens) as char).map_err(|_| ())?;
+        out.push((b'0' + ones) as char).map_err(|_| ())?;
+        Ok(())
+    }
+
+    fn read_rtc() -> (u8, u8, u8) {
+        while update_in_progress() {}
+        let second = read_cmos(0x00);
+        let minute = read_cmos(0x02);
+        let hour = read_cmos(0x04);
+        let status_b = read_cmos(0x0B);
+        let is_bcd = (status_b & 0x04) == 0;
+        let hour = if is_bcd { bcd_to_bin(hour) } else { hour };
+        let minute = if is_bcd { bcd_to_bin(minute) } else { minute };
+        let second = if is_bcd { bcd_to_bin(second) } else { second };
+        (hour, minute, second)
+    }
+
+    fn update_in_progress() -> bool {
+        read_cmos(0x0A) & 0x80 != 0
+    }
+
+    fn read_cmos(register: u8) -> u8 {
+        unsafe {
+            let mut port = Port::new(0x70);
+            let mut data = Port::new(0x71);
+            port.write(register);
+            data.read()
+        }
+    }
+
+    fn bcd_to_bin(value: u8) -> u8 {
+        (value & 0x0F) + ((value >> 4) * 10)
+    }
+}
+
 mod memory {
     use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
     use core::fmt::Write;
@@ -818,6 +918,7 @@ mod vfs {
 
 mod shell {
     use heapless::String;
+    use heapless::Vec;
 
     use crate::memory;
     use crate::storage;
@@ -839,10 +940,10 @@ mod shell {
         prompt();
     }
 
-    pub fn handle_input(ch: char) {
+    pub fn handle_input(key: crate::keyboard::KeyInput) {
         if let Some(mode) = current_mode() {
             if mode == InputMode::Tui {
-                match tui::handle_input(ch) {
+                match tui::handle_input(key) {
                     tui::TuiAction::Exit => {
                         set_mode(InputMode::Shell);
                         write_line("");
@@ -852,28 +953,33 @@ mod shell {
                 }
                 return;
             }
+            if mode == InputMode::Editor {
+                handle_editor_input(key);
+                return;
+            }
         }
         let state = unsafe { STATE.get_or_insert_with(State::new) };
 
-        match ch {
-            '\n' => {
+        match key {
+            crate::keyboard::KeyInput::Char('\n') => {
                 write_line("");
                 process_command(state);
                 prompt();
             }
-            '\x08' => {
+            crate::keyboard::KeyInput::Char('\x08') => {
                 if state.buffer.pop().is_some() {
                     vga::write_char('\u{8}');
                     vga::write_char(' ');
                     vga::write_char('\u{8}');
                 }
             }
-            _ => {
+            crate::keyboard::KeyInput::Char(ch) => {
                 if state.buffer.len() < MAX_INPUT {
                     let _ = state.buffer.push(ch);
                     vga::write_char(ch);
                 }
             }
+            _ => {}
         }
     }
 
@@ -888,6 +994,7 @@ mod shell {
     enum InputMode {
         Shell,
         Tui,
+        Editor,
     }
 
     impl State {
@@ -901,12 +1008,15 @@ mod shell {
     fn process_command(state: &mut State) {
         let input = state.buffer.clone();
         state.buffer.clear();
-        let input = input.trim();
-        if input.is_empty() {
+        handle_line(input.trim());
+    }
+
+    pub fn handle_line(line: &str) {
+        if line.is_empty() {
             return;
         }
 
-        let mut parts = input.split_whitespace();
+        let mut parts = line.split_whitespace();
         let Some(role_token) = parts.next() else {
             return;
         };
@@ -944,6 +1054,9 @@ mod shell {
             "exfat" => cmd_exfat(),
             "banner" => cmd_banner(),
             "tui" => cmd_tui(),
+            "edit" => cmd_edit(parts.next()),
+            "time" => cmd_time(),
+            "tz" => cmd_tz(parts.next()),
             _ => write_line("Unknown command. Try: pierre help"),
         }
     }
@@ -967,6 +1080,9 @@ mod shell {
         write_line("  pierre exfat     - test exFAT parser");
         write_line("  pierre banner    - show banner");
         write_line("  pierre tui       - show text UI layout");
+        write_line("  pierre edit      - open text editor");
+        write_line("  pierre time      - show GMT/local time");
+        write_line("  pierre tz        - set timezone offset");
         write_line("  suppiere gfx     - redraw framebuffer demo");
     }
 
@@ -1133,13 +1249,42 @@ mod shell {
         write_line("Text UI active. Use W/S + Enter, Q to exit.");
     }
 
+    fn cmd_edit(name: Option<&str>) {
+        let Some(name) = name else {
+            write_line("edit requires a filename.");
+            return;
+        };
+        editor_open(name);
+    }
+
+    fn cmd_time() {
+        let (gmt, local) = crate::time::formatted_times();
+        write_line(gmt.as_str());
+        write_line(local.as_str());
+    }
+
+    fn cmd_tz(offset: Option<&str>) {
+        let Some(offset) = offset else {
+            write_line("tz requires an offset like +2 or -5.");
+            return;
+        };
+        match crate::time::set_timezone(offset) {
+            Ok(_) => write_line("Timezone updated."),
+            Err(_) => write_line("Invalid timezone offset."),
+        }
+    }
+
     fn prompt() {
         vga::write_text("[NewDOS]> ");
     }
 
     fn write_line(message: &str) {
-        vga::write_text(message);
-        vga::write_text("\n");
+        if tui::is_console_mode() {
+            tui::console_write_line(message);
+        } else {
+            vga::write_text(message);
+            vga::write_text("\n");
+        }
     }
 
     static mut FS: Option<FileSystem> = None;
@@ -1161,15 +1306,125 @@ mod shell {
     fn current_mode() -> Option<InputMode> {
         unsafe { Some(MODE) }
     }
+
+    pub fn list_entries() -> Vec<crate::vfs::Entry, 32> {
+        let fs = unsafe { FS.as_ref().expect("fs not initialized") };
+        fs.list()
+    }
+
+    struct EditorState {
+        filename: String<32>,
+        buffer: Vec<char, 1024>,
+    }
+
+    static mut EDITOR: Option<EditorState> = None;
+
+    fn editor_open(name: &str) {
+        let mut state = EditorState {
+            filename: String::new(),
+            buffer: Vec::new(),
+        };
+        let _ = state.filename.push_str(name);
+        if let Some(existing) = unsafe { FS.as_ref() }.and_then(|fs| fs.read(name)) {
+            for ch in existing.chars() {
+                let _ = state.buffer.push(ch);
+            }
+        }
+        unsafe {
+            EDITOR = Some(state);
+        }
+        set_mode(InputMode::Editor);
+        vga::clear_screen();
+        vga::write_text("NewDOS Editor (F9=Save, F10=Exit)\n");
+        render_editor();
+    }
+
+    fn handle_editor_input(key: crate::keyboard::KeyInput) {
+        match key {
+            crate::keyboard::KeyInput::F9 => {
+                editor_save();
+            }
+            crate::keyboard::KeyInput::F10 => {
+                editor_exit();
+            }
+            crate::keyboard::KeyInput::Char('\x08') => {
+                if let Some(state) = unsafe { EDITOR.as_mut() } {
+                    let _ = state.buffer.pop();
+                    render_editor();
+                }
+            }
+            crate::keyboard::KeyInput::Char(ch) => {
+                if let Some(state) = unsafe { EDITOR.as_mut() } {
+                    if state.buffer.push(ch).is_ok() {
+                        render_editor();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_editor() {
+        if let Some(state) = unsafe { EDITOR.as_ref() } {
+            vga::clear_screen();
+            vga::write_text("NewDOS Editor (F9=Save, F10=Exit)\n");
+            for ch in state.buffer.iter() {
+                vga::write_char(*ch);
+            }
+        }
+    }
+
+    fn editor_save() {
+        let (filename, contents) = if let Some(state) = unsafe { EDITOR.as_ref() } {
+            let mut contents = String::<256>::new();
+            for ch in state.buffer.iter() {
+                let _ = contents.push(*ch);
+            }
+            (state.filename.clone(), contents)
+        } else {
+            return;
+        };
+        let fs = unsafe { FS.as_mut().expect("fs not initialized") };
+        if !fs.write(filename.as_str(), contents.as_str()) {
+            let _ = fs.touch(filename.as_str());
+            if fs.write(filename.as_str(), contents.as_str()) {
+                vga::write_status("Editor: saved");
+            } else {
+                vga::write_status("Editor: save failed");
+            }
+        } else {
+            vga::write_status("Editor: saved");
+        }
+    }
+
+    fn editor_exit() {
+        unsafe {
+            EDITOR = None;
+        }
+        set_mode(InputMode::Shell);
+        vga::clear_screen();
+        print_banner();
+        prompt();
+    }
 }
 
 mod tui {
-    use crate::vga::{self, Color};
+    use heapless::String;
 
-    const APPS: [&str; 3] = ["Files", "Settings", "About"];
+    use crate::vga::{self, Color};
+    use crate::vfs::EntryKind;
+
+    const APPS: [&str; 3] = ["Console", "Settings", "About"];
     const APP_ROW_START: usize = 4;
     const APP_COL_START: usize = 5;
     static mut SELECTED: usize = 0;
+    static mut MODE: TuiMode = TuiMode::Launcher;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TuiMode {
+        Launcher,
+        Console,
+    }
 
     pub enum TuiAction {
         Handled,
@@ -1188,19 +1443,48 @@ mod tui {
         vga::write_status("NewDOS Text UI");
         draw_app_list();
         draw_cursor(0);
+        draw_storage_list();
+        draw_console_help();
         vga::write_text("\n");
     }
 
-    pub fn handle_input(ch: char) -> TuiAction {
-        match ch {
-            'q' | 'Q' => {
+    pub fn handle_input(key: crate::keyboard::KeyInput) -> TuiAction {
+        match key {
+            crate::keyboard::KeyInput::Char('q') | crate::keyboard::KeyInput::Char('Q') => {
                 vga::write_status("NewDOS Text UI exited");
                 return TuiAction::Exit;
             }
-            'w' | 'W' => move_selection(-1),
-            's' | 'S' => move_selection(1),
-            '\n' => launch_selected(),
-            _ => {}
+            crate::keyboard::KeyInput::F1 => switch_mode(TuiMode::Console),
+            crate::keyboard::KeyInput::F2 => switch_mode(TuiMode::Launcher),
+            crate::keyboard::KeyInput::Char('w') | crate::keyboard::KeyInput::Char('W') => {
+                if mode() == TuiMode::Launcher {
+                    move_selection(-1);
+                }
+            }
+            crate::keyboard::KeyInput::Char('s') | crate::keyboard::KeyInput::Char('S') => {
+                if mode() == TuiMode::Launcher {
+                    move_selection(1);
+                }
+            }
+            crate::keyboard::KeyInput::Char('\n') => {
+                if mode() == TuiMode::Launcher {
+                    launch_selected();
+                } else {
+                    console_submit();
+                }
+            }
+            crate::keyboard::KeyInput::F9 | crate::keyboard::KeyInput::F10 => {}
+            crate::keyboard::KeyInput::Char('\x08') => {
+                if mode() == TuiMode::Console {
+                    console_backspace();
+                }
+            }
+            crate::keyboard::KeyInput::Char(ch) => {
+                if mode() == TuiMode::Console {
+                    console_write_char(ch);
+                }
+            }
+            crate::keyboard::KeyInput::Unknown => {}
         }
         TuiAction::Handled
     }
@@ -1252,7 +1536,109 @@ mod tui {
             let _ = status.push_str(name);
             let _ = status.push_str(" (placeholder)");
             vga::write_status(status.as_str());
+            if *name == "Console" {
+                switch_mode(TuiMode::Console);
+            }
+            if *name == "Settings" {
+                draw_settings();
+            }
         }
+    }
+
+    fn draw_storage_list() {
+        let entries = crate::shell::list_entries();
+        let mut row = 4usize;
+        for entry in entries.iter().take(5) {
+            let mut line = String::<32>::new();
+            match entry.kind {
+                EntryKind::Dir => {
+                    let _ = line.push_str("<DIR> ");
+                }
+                EntryKind::File => {
+                    let _ = line.push_str("      ");
+                }
+            }
+            let _ = line.push_str(entry.name.as_str());
+            let mut writer = vga::WRITER.lock();
+            writer.write_at(row, 44, line.as_str());
+            row += 1;
+        }
+    }
+
+    fn draw_console_help() {
+        let mut writer = vga::WRITER.lock();
+        writer.write_at(14, 4, "F1 Console  F2 Apps  Q Exit");
+    }
+
+    fn draw_settings() {
+        let mut writer = vga::WRITER.lock();
+        writer.write_at(3, 44, "Timezone:");
+        let offset = crate::time::timezone_offset();
+        let mut line = String::<16>::new();
+        let _ = line.push_str(offset.as_str());
+        writer.write_at(4, 44, line.as_str());
+    }
+
+    fn switch_mode(new_mode: TuiMode) {
+        unsafe {
+            MODE = new_mode;
+        }
+        match new_mode {
+            TuiMode::Console => vga::write_status("TUI console mode"),
+            TuiMode::Launcher => vga::write_status("TUI launcher mode"),
+        }
+    }
+
+    fn mode() -> TuiMode {
+        unsafe { MODE }
+    }
+
+    pub fn is_console_mode() -> bool {
+        mode() == TuiMode::Console
+    }
+
+    static mut CONSOLE_LINE: Option<String<64>> = None;
+
+    pub fn console_write_line(message: &str) {
+        let mut writer = vga::WRITER.lock();
+        writer.write_at(16, 4, "                                                        ");
+        writer.write_at(16, 4, message);
+    }
+
+    fn console_write_char(ch: char) {
+        unsafe {
+            if CONSOLE_LINE.is_none() {
+                CONSOLE_LINE = Some(String::new());
+            }
+            if let Some(line) = CONSOLE_LINE.as_mut() {
+                if line.push(ch).is_ok() {
+                    console_write_line(line.as_str());
+                }
+            }
+        }
+    }
+
+    fn console_backspace() {
+        unsafe {
+            if let Some(line) = CONSOLE_LINE.as_mut() {
+                let _ = line.pop();
+                console_write_line(line.as_str());
+            }
+        }
+    }
+
+    fn console_submit() {
+        let line = unsafe {
+            if let Some(line) = CONSOLE_LINE.take() {
+                line
+            } else {
+                String::new()
+            }
+        };
+        if !line.is_empty() {
+            crate::shell::handle_line(line.as_str());
+        }
+        console_write_line("");
     }
 }
 
@@ -1356,6 +1742,16 @@ mod keyboard {
     static HAS_SCANCODE: AtomicBool = AtomicBool::new(false);
     static mut SCANCODE: u8 = 0;
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum KeyInput {
+        Char(char),
+        F1,
+        F2,
+        F9,
+        F10,
+        Unknown,
+    }
+
     pub fn handle_keyboard_interrupt() {
         let mut port = Port::new(0x60);
         let scancode: u8 = unsafe { port.read() };
@@ -1365,7 +1761,7 @@ mod keyboard {
         HAS_SCANCODE.store(true, Ordering::SeqCst);
     }
 
-    pub fn poll() -> Option<char> {
+    pub fn poll() -> Option<KeyInput> {
         if !HAS_SCANCODE.swap(false, Ordering::SeqCst) {
             return None;
         }
@@ -1374,10 +1770,16 @@ mod keyboard {
         let mut keyboard = KEYBOARD.lock();
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
-                return match key {
-                    pc_keyboard::DecodedKey::Unicode(ch) => Some(ch),
-                    pc_keyboard::DecodedKey::RawKey(_) => None,
-                };
+                return Some(match key {
+                    pc_keyboard::DecodedKey::Unicode(ch) => KeyInput::Char(ch),
+                    pc_keyboard::DecodedKey::RawKey(raw) => match raw {
+                        pc_keyboard::KeyCode::F1 => KeyInput::F1,
+                        pc_keyboard::KeyCode::F2 => KeyInput::F2,
+                        pc_keyboard::KeyCode::F9 => KeyInput::F9,
+                        pc_keyboard::KeyCode::F10 => KeyInput::F10,
+                        _ => KeyInput::Unknown,
+                    },
+                });
             }
         }
         None
@@ -1399,8 +1801,8 @@ mod keyboard {
         vga::write_status(status.as_str());
     }
 
-    pub fn handle_shell_input(ch: char) {
-        shell::handle_input(ch);
+    pub fn handle_shell_input(key: KeyInput) {
+        shell::handle_input(key);
     }
 }
 
@@ -1530,9 +1932,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     shell::init();
 
     loop {
-        if let Some(ch) = keyboard::poll() {
-            keyboard::handle_shell_input(ch);
-        }
+    if let Some(key) = keyboard::poll() {
+        keyboard::handle_shell_input(key);
+    }
         x86_64::instructions::hlt();
     }
 }

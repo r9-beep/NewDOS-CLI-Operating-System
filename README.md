@@ -18,7 +18,8 @@ handling, with a minimal CLI and an in-memory filesystem (no disk-backed FS yet)
 - Simple CLI with `pierre` (user) and `suppiere` (admin) command prefixes.
 - In-memory filesystem (mkdir/touch/write/cat/del) for CLI demos.
 - GPT/exFAT parser demo commands (`pierre gpt`, `pierre exfat`).
-- Text-based UI layout demo (`pierre tui`) for VGA-only setups.
+- Text-based UI layout demo (`pierre tui`) for VGA-only setups (F1 console, F2 apps).
+- Simple text editor (`pierre edit <file>`), plus time and timezone commands.
 
 > **Note:** There is no disk driver or disk-backed filesystem, so this is a minimal kernel foundation.
 > External video output (HDMI/DisplayPort) depends on firmware-provided framebuffers (UEFI GOP).
@@ -51,10 +52,16 @@ pierre mem
 pierre gpt
 pierre exfat
 pierre tui
+pierre edit notes.txt
+pierre time
+pierre tz +2
 suppiere gfx
 ```
 
-The text UI uses **W/S** to move, **Enter** to open, and **Q** to exit.
+The text UI uses **W/S** to move, **Enter** to open, **F1** for console,
+**F2** to return to apps, and **Q** to exit.
+
+The editor uses **F9** to save and **F10** to exit.
 
 ## Build and run in QEMU (BIOS)
 
