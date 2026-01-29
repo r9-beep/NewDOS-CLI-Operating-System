@@ -565,8 +565,20 @@ mod time {
         if hours.abs() > 12 {
             return Err(());
         }
-        TZ_OFFSET.store(hours * sign, Ordering::SeqCst);
+        set_offset(hours * sign);
         Ok(())
+    }
+
+    pub fn adjust_timezone(delta: i8) {
+        let current = TZ_OFFSET.load(Ordering::SeqCst);
+        let mut next = current.saturating_add(delta);
+        if next > 12 {
+            next = 12;
+        }
+        if next < -12 {
+            next = -12;
+        }
+        set_offset(next);
     }
 
     pub fn timezone_offset() -> String<8> {
@@ -641,6 +653,53 @@ mod time {
 
     fn bcd_to_bin(value: u8) -> u8 {
         (value & 0x0F) + ((value >> 4) * 10)
+    }
+
+    fn set_offset(value: i8) {
+        TZ_OFFSET.store(value, Ordering::SeqCst);
+    }
+}
+
+mod settings {
+    use heapless::String;
+
+    static mut USER: Option<String<32>> = None;
+    static mut DEVICE: Option<String<32>> = None;
+
+    pub fn set_user(name: &str) {
+        let mut value = String::<32>::new();
+        let _ = value.push_str(name);
+        unsafe {
+            USER = Some(value);
+        }
+    }
+
+    pub fn set_device(name: &str) {
+        let mut value = String::<32>::new();
+        let _ = value.push_str(name);
+        unsafe {
+            DEVICE = Some(value);
+        }
+    }
+
+    pub fn user() -> String<32> {
+        unsafe {
+            USER.clone().unwrap_or_else(|| {
+                let mut value = String::<32>::new();
+                let _ = value.push_str("pierre");
+                value
+            })
+        }
+    }
+
+    pub fn device() -> String<32> {
+        unsafe {
+            DEVICE.clone().unwrap_or_else(|| {
+                let mut value = String::<32>::new();
+                let _ = value.push_str("NewDOS");
+                value
+            })
+        }
     }
 }
 
@@ -1058,6 +1117,8 @@ mod shell {
             "edit" => cmd_edit(parts.next()),
             "time" => cmd_time(),
             "tz" => cmd_tz(parts.next()),
+            "user" => cmd_user(parts.next()),
+            "device" => cmd_device(parts.next()),
             _ => write_line("Unknown command. Try: pierre help"),
         }
     }
@@ -1084,6 +1145,8 @@ mod shell {
         write_line("  pierre edit      - open text editor");
         write_line("  pierre time      - show GMT/local time");
         write_line("  pierre tz        - set timezone offset");
+        write_line("  pierre user      - set user name");
+        write_line("  pierre device    - set device name");
         write_line("  suppiere gfx     - redraw framebuffer demo");
     }
 
@@ -1275,6 +1338,24 @@ mod shell {
         }
     }
 
+    fn cmd_user(name: Option<&str>) {
+        let Some(name) = name else {
+            write_line("user requires a name.");
+            return;
+        };
+        crate::settings::set_user(name);
+        write_line("User updated.");
+    }
+
+    fn cmd_device(name: Option<&str>) {
+        let Some(name) = name else {
+            write_line("device requires a name.");
+            return;
+        };
+        crate::settings::set_device(name);
+        write_line("Device updated.");
+    }
+
     fn prompt() {
         vga::write_text("[NewDOS]> ");
     }
@@ -1311,6 +1392,10 @@ mod shell {
     pub fn list_entries() -> Vec<crate::vfs::Entry, 32> {
         let fs = unsafe { FS.as_ref().expect("fs not initialized") };
         fs.list()
+    }
+
+    pub fn is_tui_mode() -> bool {
+        matches!(unsafe { MODE }, InputMode::Tui)
     }
 
     struct EditorState {
@@ -1425,6 +1510,7 @@ mod tui {
     enum TuiMode {
         Launcher,
         Console,
+        Settings,
     }
 
     pub enum TuiAction {
@@ -1451,12 +1537,24 @@ mod tui {
 
     pub fn handle_input(key: crate::keyboard::KeyInput) -> TuiAction {
         match key {
-            crate::keyboard::KeyInput::Char('q') | crate::keyboard::KeyInput::Char('Q') => {
-                vga::write_status("NewDOS Text UI exited");
-                return TuiAction::Exit;
-            }
             crate::keyboard::KeyInput::F1 => switch_mode(TuiMode::Console),
             crate::keyboard::KeyInput::F2 => switch_mode(TuiMode::Launcher),
+            crate::keyboard::KeyInput::F3 => switch_mode(TuiMode::Settings),
+            crate::keyboard::KeyInput::Char('q') | crate::keyboard::KeyInput::Char('Q') => {
+                if mode() == TuiMode::Settings {
+                    crate::time::adjust_timezone(-1);
+                    draw_settings();
+                } else {
+                    vga::write_status("NewDOS Text UI exited");
+                    return TuiAction::Exit;
+                }
+            }
+            crate::keyboard::KeyInput::Char('e') | crate::keyboard::KeyInput::Char('E') => {
+                if mode() == TuiMode::Settings {
+                    crate::time::adjust_timezone(1);
+                    draw_settings();
+                }
+            }
             crate::keyboard::KeyInput::Char('w') | crate::keyboard::KeyInput::Char('W') => {
                 if mode() == TuiMode::Launcher {
                     move_selection(-1);
@@ -1470,18 +1568,20 @@ mod tui {
             crate::keyboard::KeyInput::Char('\n') => {
                 if mode() == TuiMode::Launcher {
                     launch_selected();
+                } else if mode() == TuiMode::Settings {
+                    settings_submit();
                 } else {
                     console_submit();
                 }
             }
             crate::keyboard::KeyInput::F9 | crate::keyboard::KeyInput::F10 => {}
             crate::keyboard::KeyInput::Char('\x08') => {
-                if mode() == TuiMode::Console {
+                if mode() != TuiMode::Launcher {
                     console_backspace();
                 }
             }
             crate::keyboard::KeyInput::Char(ch) => {
-                if mode() == TuiMode::Console {
+                if mode() != TuiMode::Launcher {
                     console_write_char(ch);
                 }
             }
@@ -1541,7 +1641,11 @@ mod tui {
                 switch_mode(TuiMode::Console);
             }
             if *name == "Settings" {
+                switch_mode(TuiMode::Settings);
                 draw_settings();
+            }
+            if *name == "About" {
+                draw_about();
             }
         }
     }
@@ -1568,7 +1672,7 @@ mod tui {
 
     fn draw_console_help() {
         let mut writer = vga::WRITER.lock();
-        writer.write_at(14, 4, "F1 Console  F2 Apps  Q Exit");
+        writer.write_at(14, 4, "F1 Console  F2 Apps  F3 Settings  Q Exit");
     }
 
     fn draw_settings() {
@@ -1578,6 +1682,27 @@ mod tui {
         let mut line = String::<16>::new();
         let _ = line.push_str(offset.as_str());
         writer.write_at(4, 44, line.as_str());
+        let user = crate::settings::user();
+        let device = crate::settings::device();
+        writer.write_at(6, 44, "User:");
+        writer.write_at(7, 44, user.as_str());
+        writer.write_at(9, 44, "Device:");
+        writer.write_at(10, 44, device.as_str());
+        writer.write_at(12, 44, "Q/E adjust TZ");
+        writer.write_at(13, 44, "Enter: user <n>");
+        writer.write_at(14, 44, "Enter: device <n>");
+    }
+
+    fn draw_about() {
+        let mut writer = vga::WRITER.lock();
+        writer.write_at(3, 44, "About NewDOS");
+        let user = crate::settings::user();
+        let device = crate::settings::device();
+        writer.write_at(5, 44, "User:");
+        writer.write_at(6, 44, user.as_str());
+        writer.write_at(8, 44, "Device:");
+        writer.write_at(9, 44, device.as_str());
+        writer.write_at(11, 44, "Version: 0.1");
     }
 
     fn switch_mode(new_mode: TuiMode) {
@@ -1587,6 +1712,7 @@ mod tui {
         match new_mode {
             TuiMode::Console => vga::write_status("TUI console mode"),
             TuiMode::Launcher => vga::write_status("TUI launcher mode"),
+            TuiMode::Settings => vga::write_status("TUI settings mode"),
         }
     }
 
@@ -1637,9 +1763,50 @@ mod tui {
             }
         };
         if !line.is_empty() {
-            crate::shell::handle_line(line.as_str());
+            if mode() == TuiMode::Settings {
+                handle_settings_command(line.as_str());
+            } else {
+                crate::shell::handle_line(line.as_str());
+            }
         }
         console_write_line("");
+    }
+
+    fn settings_submit() {
+        console_submit();
+    }
+
+    fn handle_settings_command(line: &str) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("user ") {
+            crate::settings::set_user(rest.trim());
+            draw_settings();
+            return;
+        }
+        if let Some(rest) = trimmed.strip_prefix("device ") {
+            crate::settings::set_device(rest.trim());
+            draw_settings();
+            return;
+        }
+        vga::write_status("Settings: use 'user <name>' or 'device <name>'");
+    }
+
+    pub fn tick() {
+        if !crate::shell::is_tui_mode() {
+            return;
+        }
+        let (gmt, local) = crate::time::formatted_times();
+        let mut status = String::<64>::new();
+        let _ = status.push_str("TUI ");
+        let _ = match mode() {
+            TuiMode::Launcher => status.push_str("Apps "),
+            TuiMode::Console => status.push_str("Console "),
+            TuiMode::Settings => status.push_str("Settings "),
+        };
+        let _ = status.push_str(gmt.as_str());
+        let _ = status.push_str(" ");
+        let _ = status.push_str(local.as_str());
+        vga::write_status(status.as_str());
     }
 }
 
@@ -1748,6 +1915,7 @@ mod keyboard {
         Char(char),
         F1,
         F2,
+        F3,
         F9,
         F10,
         Unknown,
@@ -1776,6 +1944,7 @@ mod keyboard {
                     pc_keyboard::DecodedKey::RawKey(raw) => match raw {
                         pc_keyboard::KeyCode::F1 => KeyInput::F1,
                         pc_keyboard::KeyCode::F2 => KeyInput::F2,
+                        pc_keyboard::KeyCode::F3 => KeyInput::F3,
                         pc_keyboard::KeyCode::F9 => KeyInput::F9,
                         pc_keyboard::KeyCode::F10 => KeyInput::F10,
                         _ => KeyInput::Unknown,
@@ -1933,9 +2102,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     shell::init();
 
     loop {
-    if let Some(key) = keyboard::poll() {
-        keyboard::handle_shell_input(key);
-    }
+        if let Some(key) = keyboard::poll() {
+            keyboard::handle_shell_input(key);
+        }
+        tui::tick();
         x86_64::instructions::hlt();
     }
 }

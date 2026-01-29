@@ -55,11 +55,15 @@ pierre tui
 pierre edit notes.txt
 pierre time
 pierre tz +2
+pierre user pierre
+pierre device NewDOS-Laptop
 suppiere gfx
 ```
 
 The text UI uses **W/S** to move, **Enter** to open, **F1** for console,
-**F2** to return to apps, and **Q** to exit.
+**F2** to return to apps, **F3** for settings, and **Q** to exit (outside settings).
+In settings, **Q/E** adjust the timezone and the console accepts `user <name>` and
+`device <name>` updates.
 
 The editor uses **F9** to save and **F10** to exit.
 
