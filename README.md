@@ -76,6 +76,6 @@ cargo install bootimage
 Then build and run:
 
 ```bash
-cargo bootimage 
+cargo bootimage ```
 
 then use rufus to etch the .bin to to a USB flash stick (1gb+ for useage reasons) and then on your device enable legacy boot as there is o UEFI support because its bootloader 0.9. . 
