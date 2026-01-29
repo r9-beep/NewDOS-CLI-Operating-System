@@ -73,9 +73,9 @@ rustup target add x86_64-unknown-none
 cargo install bootimage
 ```
 
-Then build and run:
+ use rufus to etch the .bin to to a USB flash stick (1gb+ for usage reasons) and then on your device enable legacy boot as there is o UEFI support because its bootloader 0.9. . 
 
-```bash
-cargo bootimage ```
 
-then use rufus to etch the .bin to to a USB flash stick (1gb+ for useage reasons) and then on your device enable legacy boot as there is o UEFI support because its bootloader 0.9. . 
+ to build use: 
+ ```bash
+cargo bootimage 
