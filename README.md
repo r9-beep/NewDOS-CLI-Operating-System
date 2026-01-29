@@ -73,13 +73,5 @@ cargo bootimage
 qemu-system-x86_64 -drive format=raw,file=target/x86_64-newdos/debug/bootimage-NewDOS-CLI-Operating-System.bin
 ```
 
-## Build and run in QEMU (UEFI)
-
-You need OVMF firmware installed (package name varies by distro, e.g. `ovmf` or `edk2-ovmf`). Then:
-
-```bash
-cargo bootimage --features uefi
-qemu-system-x86_64 \
-  -drive format=raw,file=target/x86_64-newdos/debug/bootimage-NewDOS-CLI-Operating-System.bin \
-  -bios /usr/share/OVMF/OVMF_CODE.fd
-```
+> **Note:** `bootloader` v0.9 does **not** support the `uefi` feature. This repo is BIOS-only
+> unless you upgrade the bootloader dependency.

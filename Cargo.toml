@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bootloader = { version = "0.9", features = ["uefi"] }
+bootloader = "0.9"
 heapless = "0.8"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 linked_list_allocator = "0.10"
