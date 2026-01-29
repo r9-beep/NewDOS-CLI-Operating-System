@@ -63,7 +63,7 @@ The text UI uses **W/S** to move, **Enter** to open, **F1** for console,
 
 The editor uses **F9** to save and **F10** to exit.
 
-## Build and run in QEMU (BIOS)
+## Build and run on bare mtal #
 
 You need the Rust nightly toolchain and the `bootimage` tool:
 
@@ -77,8 +77,4 @@ Then build and run:
 
 ```bash
 cargo bootimage
-qemu-system-x86_64 -drive format=raw,file=target/x86_64-newdos/debug/bootimage-NewDOS-CLI-Operating-System.bin
-```
-
-> **Note:** `bootloader` v0.9 does **not** support the `uefi` feature. This repo is BIOS-only
-> unless you upgrade the bootloader dependency.
+then use rufus to etch the .bin to to a USB flash stick (1gb+ for useage reasons) and then on your device enable legacy boot as there is o UEFI support because its bootloader 0.9. . 
