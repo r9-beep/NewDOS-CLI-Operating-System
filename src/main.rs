@@ -4,13 +4,29 @@
 #![feature(alloc_error_handler)]
 
 use bootloader::{entry_point, BootInfo};
+use core::fmt::Write;
 use core::panic::PanicInfo;
 use linked_list_allocator::LockedHeap;
 
 mod vga {
     use core::fmt;
+    use lazy_static::lazy_static;
     use spin::Mutex;
-    use volatile::Volatile;
+
+    #[repr(transparent)]
+    struct Volatile<T> {
+        value: T,
+    }
+
+    impl<T: Copy> Volatile<T> {
+        fn read(&self) -> T {
+            unsafe { core::ptr::read_volatile(&self.value) }
+        }
+
+        fn write(&mut self, value: T) {
+            unsafe { core::ptr::write_volatile(&mut self.value, value) }
+        }
+    }
 
     #[allow(dead_code)]
     #[derive(Clone, Copy)]
@@ -156,7 +172,9 @@ mod vga {
         }
     }
 
-    pub static WRITER: Mutex<Writer> = Mutex::new(Writer::new());
+    lazy_static! {
+        pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer::new());
+    }
 
     pub fn write_status(message: &str) {
         let mut writer = WRITER.lock();
@@ -242,66 +260,9 @@ mod vga {
 }
 
 mod gfx {
-    use bootloader::bootinfo::FrameBuffer;
-
-    pub struct Graphics {
-        buffer: &'static mut [u8],
-        info: bootloader::bootinfo::FrameBufferInfo,
+    pub fn unsupported_message() {
+        crate::vga::write_status("Framebuffer unavailable on bootloader v0.9");
     }
-
-    impl Graphics {
-        pub fn new(framebuffer: &'static mut FrameBuffer) -> Self {
-            let info = framebuffer.info();
-            let buffer = framebuffer.buffer_mut();
-            Self { buffer, info }
-        }
-
-        pub fn clear(&mut self, color: [u8; 4]) {
-            for chunk in self.buffer.chunks_exact_mut(self.info.bytes_per_pixel) {
-                for (idx, byte) in chunk.iter_mut().enumerate() {
-                    *byte = color.get(idx).copied().unwrap_or(0);
-                }
-            }
-        }
-
-        pub fn draw_demo(&mut self) {
-            let width = self.info.width as usize;
-            let height = self.info.height as usize;
-            let stride = self.info.stride;
-            let bpp = self.info.bytes_per_pixel;
-
-            for y in 0..height {
-                for x in 0..width {
-                    let offset = (y * stride + x) * bpp;
-                    if offset + bpp <= self.buffer.len() {
-                        let shade = ((x + y) % 256) as u8;
-                        self.buffer[offset] = shade;
-                        if bpp > 1 {
-                            self.buffer[offset + 1] = shade / 2;
-                        }
-                        if bpp > 2 {
-                            self.buffer[offset + 2] = 255 - shade;
-                        }
-                        if bpp > 3 {
-                            self.buffer[offset + 3] = 0;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-static mut BOOT_FRAMEBUFFER: Option<*mut bootloader::bootinfo::FrameBuffer> = None;
-
-fn set_boot_framebuffer(framebuffer: Option<&'static mut bootloader::bootinfo::FrameBuffer>) {
-    unsafe {
-        BOOT_FRAMEBUFFER = framebuffer.map(|fb| fb as *mut _);
-    }
-}
-
-fn boot_framebuffer() -> Option<&'static mut bootloader::bootinfo::FrameBuffer> {
-    unsafe { BOOT_FRAMEBUFFER.and_then(|ptr| ptr.as_mut()) }
 }
 
 mod gdt {
@@ -676,7 +637,7 @@ mod memory {
     static mut HEAP_SPACE: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     static mut MEMORY_MAP: Option<&'static MemoryMap> = None;
 
-    pub fn init_frame_allocator(map: &MemoryMap) {
+    pub fn init_frame_allocator(map: &'static MemoryMap) {
         unsafe {
             MEMORY_MAP = Some(map);
         }
@@ -705,7 +666,7 @@ mod memory {
         unsafe {
             super::ALLOCATOR
                 .lock()
-                .init(HEAP_SPACE.as_ptr() as usize, HEAP_SPACE.len());
+                .init(HEAP_SPACE.as_mut_ptr(), HEAP_SPACE.len());
         }
     }
 
@@ -938,8 +899,9 @@ mod shell {
     }
 
     fn process_command(state: &mut State) {
-        let input = state.buffer.trim();
+        let input = state.buffer.clone();
         state.buffer.clear();
+        let input = input.trim();
         if input.is_empty() {
             return;
         }
@@ -1121,14 +1083,8 @@ mod shell {
             write_line("gfx requires suppiere (admin).");
             return;
         }
-        if let Some(framebuffer) = crate::boot_framebuffer() {
-            let mut graphics = crate::gfx::Graphics::new(framebuffer);
-            graphics.clear([0, 0, 0, 0]);
-            graphics.draw_demo();
-            write_line("Graphics demo redrawn.");
-        } else {
-            write_line("No framebuffer available.");
-        }
+        crate::gfx::unsupported_message();
+        write_line("Framebuffer support requires newer bootloader.");
     }
 
     fn cmd_whoami(role: Role) {
@@ -1390,10 +1346,11 @@ mod keyboard {
     use x86_64::instructions::port::Port;
 
     use crate::shell;
+    use crate::vga;
 
     lazy_static! {
         static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
-            Mutex::new(Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore));
+            Mutex::new(Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore));
     }
 
     static HAS_SCANCODE: AtomicBool = AtomicBool::new(false);
@@ -1545,7 +1502,6 @@ use crate::interrupts::PICS;
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    set_boot_framebuffer(boot_info.framebuffer.as_mut());
     gdt::init();
     interrupts::init_idt();
     unsafe { PICS.lock().initialize() };
@@ -1569,12 +1525,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         vga::write_status("Storage: AHCI controller detected");
     } else {
         vga::write_status("Storage: no AHCI controller detected");
-    }
-
-    if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        let mut graphics = gfx::Graphics::new(framebuffer);
-        graphics.clear([0, 0, 0, 0]);
-        graphics.draw_demo();
     }
 
     shell::init();
