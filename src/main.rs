@@ -921,6 +921,7 @@ mod shell {
     use heapless::Vec;
 
     use crate::memory;
+    use crate::print_banner;
     use crate::storage;
     use crate::tui;
     use crate::vga;
