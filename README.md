@@ -1,7 +1,8 @@
 # NewDOS Base Kernel
 
-This project builds a **bootable x86_64 base kernel**. It provides VGA text output plus basic PS/2 keyboard and mouse interrupt
-handling, with a minimal CLI and an in-memory filesystem (With AHCI detection and drivers yet no proper writing YET).
+This project builds a **bootable x86_64 base kernel** used as the foundation for the POPCoRN
+and NKS kernels. It provides VGA text output plus basic PS/2 keyboard and mouse interrupt
+handling, with a minimal CLI and an in-memory filesystem (no disk-backed FS yet).
 
 ## Features
 
@@ -41,8 +42,8 @@ Example commands:
 
 ```
 pierre help
-pierre edit
 pierre dir
+pierre ls
 pierre mkdir docs
 pierre touch notes.txt
 pierre write notes.txt hello
@@ -55,17 +56,20 @@ pierre tui
 pierre edit notes.txt
 pierre time
 pierre tz +2
+pierre cd /
+pierre user pierre
+pierre device NewDOS-Laptop
 suppiere gfx
-suppiere restart
-suppiere install
 ```
 
 The text UI uses **W/S** to move, **Enter** to open, **F1** for console,
-**F2** to return to apps, and **Q** to exit.
+**F2** to return to apps, **F3** for settings, and **Q** to exit (outside settings).
+In settings, **Q/E** adjust the timezone and the console accepts `user <name>` and
+`device <name>` updates.
 
 The editor uses **F9** to save and **F10** to exit.
 
-## Build and run on bare mtal #
+## Build and run in QEMU (BIOS)
 
 You need the Rust nightly toolchain and the `bootimage` tool:
 
@@ -75,9 +79,12 @@ rustup target add x86_64-unknown-none
 cargo install bootimage
 ```
 
- use rufus to etch the .bin to to a USB flash stick (1gb+ for usage reasons) and then on your device enable legacy boot as there is o UEFI support because its bootloader 0.9. . 
+Then build and run:
 
+```bash
+cargo bootimage
+qemu-system-x86_64 -drive format=raw,file=target/x86_64-newdos/debug/bootimage-NewDOS-CLI-Operating-System.bin
+```
 
- to build use: 
- ```bash
-cargo bootimage 
+> **Note:** `bootloader` v0.9 does **not** support the `uefi` feature. This repo is BIOS-only
+> unless you upgrade the bootloader dependency.
