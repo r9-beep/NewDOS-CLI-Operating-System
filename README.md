@@ -1,7 +1,7 @@
 # NewDOS Base Kernel
 
 This project builds a **bootable x86_64 base kernel**. It provides VGA text output plus basic PS/2 keyboard and mouse interrupt
-handling, with a minimal CLI and an in-memory filesystem (no disk-backed FS yet).
+handling, with a minimal CLI and an in-memory filesystem (With AHCI detection and drivers yet no proper writing YET).
 
 ## Features
 
@@ -41,6 +41,7 @@ Example commands:
 
 ```
 pierre help
+pierre edit
 pierre dir
 pierre mkdir docs
 pierre touch notes.txt
@@ -55,6 +56,8 @@ pierre edit notes.txt
 pierre time
 pierre tz +2
 suppiere gfx
+suppiere restart
+suppiere install
 ```
 
 The text UI uses **W/S** to move, **Enter** to open, **F1** for console,
