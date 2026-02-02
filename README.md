@@ -1,7 +1,6 @@
 # NewDOS Base Kernel
 
-This project builds a **bootable x86_64 base kernel** used as the foundation for the POPCoRN
-and NKS kernels. It provides VGA text output plus basic PS/2 keyboard and mouse interrupt
+This project builds a **bootable x86_64 base kernel**. It provides VGA text output plus basic PS/2 keyboard and mouse interrupt
 handling, with a minimal CLI and an in-memory filesystem (no disk-backed FS yet).
 
 ## Features
