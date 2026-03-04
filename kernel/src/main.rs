@@ -10,6 +10,7 @@ use bootloader_api::config::Mapping;
 use x86_64::VirtAddr;
 
 pub mod allocator;
+pub mod cli;
 pub mod framebuffer;
 pub mod gdt;
 pub mod gui;
@@ -34,10 +35,27 @@ static BOOTLOADER_CONFIG: BootloaderConfig = {
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
+// ── boot mode ─────────────────────────────────────────────────────────────────
+
+enum BootMode { Gui, Cli }
+
+fn await_boot_mode() -> BootMode {
+    loop {
+        x86_64::instructions::hlt();
+        if let Some(c) = keyboard::pop_char() {
+            match c {
+                '1' | '\r' | '\n' => return BootMode::Gui,
+                '2'               => return BootMode::Cli,
+                _                 => {}
+            }
+        }
+    }
+}
+
 // ── kernel entry point ────────────────────────────────────────────────────────
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    serial_println!("NewDOS kernel starting (bootloader 0.11 / GUI)...");
+    serial_println!("NewDOS kernel starting (bootloader 0.11)...");
 
     gdt::init();
     serial_println!("[OK] GDT");
@@ -53,7 +71,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     allocator::init_heap(&mut mapper, &mut frame_alloc).expect("heap init failed");
     serial_println!("[OK] Heap");
 
-    // Framebuffer — required for the GUI
     let (sw, sh) = if let Some(fb) = boot_info.framebuffer.as_mut() {
         let info = fb.info();
         let (w, h) = (info.width, info.height);
@@ -62,24 +79,35 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         framebuffer::init(fb_static);
         (w, h)
     } else {
-        serial_println!("[WARN] No framebuffer — VGA text fallback");
-        (1024, 768) // assume default; GUI won't render without FB
+        serial_println!("[WARN] No framebuffer");
+        (1024, 768)
     };
 
     mouse::init();
     serial_println!("[OK] Mouse");
 
-    // ── Start GUI ─────────────────────────────────────────────────────────────
-    serial_println!("[OK] Starting GUI ({}x{})", sw, sh);
-    let mut gui = gui::Gui::new(sw, sh);
+    // ── Boot menu ─────────────────────────────────────────────────────────────
+    framebuffer::draw_boot_menu();
+    serial_println!("[OK] Boot menu — waiting for selection");
 
-    // Busy loop — redraws GUI every iteration for smooth cursor movement
-    loop {
-        gui.tick();
-        // Small yield via hlt only if no mouse activity to reduce CPU heat
-        let updated = mouse::STATE.lock().updated;
-        if !updated {
-            x86_64::instructions::hlt();
+    match await_boot_mode() {
+        BootMode::Gui => {
+            serial_println!("[OK] GUI mode selected");
+            mouse::set_bounds(sw, sh);
+            let mut gui = gui::Gui::new(sw, sh);
+            loop {
+                gui.tick();
+                let updated = mouse::STATE.lock().updated;
+                if !updated { x86_64::instructions::hlt(); }
+            }
+        }
+        BootMode::Cli => {
+            serial_println!("[OK] CLI mode selected");
+            let mut cli = cli::CliMode::new();
+            loop {
+                cli.tick();
+                x86_64::instructions::hlt();
+            }
         }
     }
 }

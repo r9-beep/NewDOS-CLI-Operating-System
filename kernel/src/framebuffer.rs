@@ -521,6 +521,79 @@ pub fn redraw_demo() {
     }
 }
 
+/// Draw the interactive boot-mode selection menu.
+pub fn draw_boot_menu() {
+    let mut guard = FB_WRITER.lock();
+    let fb = match guard.as_mut() { Some(f) => f, None => return };
+
+    let sw = fb.width();
+    let sh = fb.height();
+
+    // Dark background with faint gradient
+    for y in 0..sh {
+        let t  = y * 30 / sh.max(1);
+        let bg = Rgb { r: (10 + t) as u8, g: (10 + t) as u8, b: (25 + t * 2) as u8 };
+        fb.fill_rect(0, y, sw, 1, bg);
+    }
+
+    // Accent bar
+    fb.fill_rect(0, 0, sw, 4, Rgb::ACCENT);
+
+    // Centre box
+    let bw = 520usize;
+    let bh = 260usize;
+    let bx = (sw / 2).saturating_sub(bw / 2);
+    let by = (sh / 2).saturating_sub(bh / 2);
+
+    fb.fill_rect(bx, by, bw, bh, Rgb { r: 16, g: 16, b: 32 });
+    fb.draw_rect_outline(bx, by, bw, bh, Rgb::ACCENT);
+
+    // Title
+    let title = "NewDOS v0.1.1";
+    fb.draw_str_scaled(
+        (sw / 2).saturating_sub(title.len() * 12),
+        by + 20,
+        title, 3, Rgb::ACCENT, Rgb { r: 16, g: 16, b: 32 },
+    );
+
+    // Subtitle
+    let sub = "Select boot mode:";
+    fb.draw_str(
+        (sw / 2).saturating_sub(sub.len() * 4),
+        by + 74,
+        sub, Rgb::WHITE, Rgb { r: 16, g: 16, b: 32 },
+    );
+
+    // Divider
+    fb.fill_rect(bx + 20, by + 88, bw - 40, 1, Rgb { r: 50, g: 50, b: 80 });
+
+    // Option 1 — GUI
+    let opt1_y = by + 100;
+    fb.fill_rect(bx + 20, opt1_y, bw - 40, 44, Rgb { r: 22, g: 22, b: 48 });
+    fb.draw_rect_outline(bx + 20, opt1_y, bw - 40, 44, Rgb::ACCENT);
+    fb.draw_str(bx + 36, opt1_y + 8,  "[1]  Desktop  — GUI, mouse, draggable windows",
+                Rgb::ACCENT, Rgb { r: 22, g: 22, b: 48 });
+    fb.draw_str(bx + 36, opt1_y + 22, "     Mouse-driven, taskbar, multiple apps",
+                Rgb { r: 140, g: 180, b: 220 }, Rgb { r: 22, g: 22, b: 48 });
+
+    // Option 2 — CLI
+    let opt2_y = opt1_y + 54;
+    fb.fill_rect(bx + 20, opt2_y, bw - 40, 44, Rgb { r: 16, g: 22, b: 16 });
+    fb.draw_rect_outline(bx + 20, opt2_y, bw - 40, 44, Rgb::GREEN);
+    fb.draw_str(bx + 36, opt2_y + 8,  "[2]  Terminal — CLI, full-screen shell",
+                Rgb::GREEN, Rgb { r: 16, g: 22, b: 16 });
+    fb.draw_str(bx + 36, opt2_y + 22, "     Classic text console, keyboard-only",
+                Rgb { r: 100, g: 200, b: 100 }, Rgb { r: 16, g: 22, b: 16 });
+
+    // Hint
+    fb.draw_str(
+        (sw / 2).saturating_sub(19 * 4),
+        by + bh - 24,
+        "Press 1 or 2 to continue",
+        Rgb { r: 100, g: 100, b: 140 }, Rgb { r: 16, g: 16, b: 32 },
+    );
+}
+
 // ── fmt::Write macro shims ────────────────────────────────────────────────────
 
 #[macro_export]
