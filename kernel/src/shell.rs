@@ -1,39 +1,73 @@
-//! NewDOS interactive shell.
-//! Role prefix: `pierre` = user, `suppiere` = admin.
+//! NewDOS interactive shell — renders into a TextBuffer; GUI windows display it.
 
-use crate::{framebuffer, storage, time, vfs};
+use crate::{keyboard::SpecialKey, storage, time, vfs};
 use alloc::{
     format,
     string::{String, ToString},
     vec::Vec,
 };
-use spin::Mutex;
 
-// ── special key codes ─────────────────────────────────────────────────────────
+// ── TextBuffer ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SpecialKey { F1, F2, F3, F9, F10 }
+/// Scrollback buffer that windows render line-by-line.
+pub struct TextBuffer {
+    pub lines:    Vec<String>,
+    pub input:    String,   // current input line (not yet submitted)
+    max_lines:    usize,
+    current_line: String,   // line being assembled from push_str calls
+}
 
-// ── global input queue (written by keyboard ISR) ───────────────────────────
+impl TextBuffer {
+    pub fn new(max_lines: usize) -> Self {
+        TextBuffer {
+            lines: Vec::new(),
+            input: String::new(),
+            max_lines,
+            current_line: String::new(),
+        }
+    }
 
-static INPUT_CHAR:    Mutex<Option<char>>       = Mutex::new(None);
-static INPUT_SPECIAL: Mutex<Option<SpecialKey>> = Mutex::new(None);
+    /// Write a string into the buffer, splitting on newlines.
+    pub fn push_str(&mut self, s: &str) {
+        for ch in s.chars() {
+            if ch == '\n' {
+                let line = core::mem::take(&mut self.current_line);
+                self.lines.push(line);
+                if self.lines.len() > self.max_lines {
+                    self.lines.remove(0);
+                }
+            } else {
+                self.current_line.push(ch);
+            }
+        }
+    }
 
-pub fn push_char(c: char)        { *INPUT_CHAR.lock()    = Some(c); }
-pub fn push_special(k: SpecialKey) { *INPUT_SPECIAL.lock() = Some(k); }
+    /// Flush any partial line.
+    pub fn flush(&mut self) {
+        if !self.current_line.is_empty() {
+            let line = core::mem::take(&mut self.current_line);
+            self.lines.push(line);
+            if self.lines.len() > self.max_lines {
+                self.lines.remove(0);
+            }
+        }
+    }
 
-fn pop_char()    -> Option<char>       { INPUT_CHAR.lock().take() }
-fn pop_special() -> Option<SpecialKey> { INPUT_SPECIAL.lock().take() }
+    /// Last N lines visible in the terminal area.
+    pub fn tail(&self, n: usize) -> &[String] {
+        let len = self.lines.len();
+        if len > n { &self.lines[len - n..] } else { &self.lines }
+    }
+}
 
-// ── shell state ───────────────────────────────────────────────────────────────
+// ── ShellState ────────────────────────────────────────────────────────────────
 
 pub struct ShellState {
+    pub output:      TextBuffer,
     pub fs:          vfs::FileSystem,
     pub cwd:         String,
     pub username:    String,
     pub device:      String,
-    pub tz_offset:   i8,
-    pub line:        String,
     /// `None` = shell mode, `Some(path)` = editor mode
     pub editor_file: Option<String>,
     pub editor_buf:  String,
@@ -42,50 +76,47 @@ pub struct ShellState {
 impl ShellState {
     pub fn new() -> Self {
         ShellState {
+            output:      TextBuffer::new(200),
             fs:          vfs::FileSystem::new(),
             cwd:         String::from("/"),
             username:    String::from("pierre"),
             device:      String::from("NewDOS-PC"),
-            tz_offset:   0,
-            line:        String::new(),
             editor_file: None,
             editor_buf:  String::new(),
         }
     }
 
-    fn print(&self, s: &str) {
-        // Try framebuffer first, fall back to VGA
-        if framebuffer::FB_WRITER.lock().is_some() {
-            crate::fb_print!("{}", s);
-        } else {
-            crate::print!("{}", s);
+    fn out(&mut self, s: &str) { self.output.push_str(s); }
+    fn outln(&mut self, s: &str) { self.output.push_str(s); self.output.push_str("\n"); }
+
+    pub fn prompt_string(&self) -> String {
+        format!("{}@{}:{}> ", self.username, self.device, self.cwd)
+    }
+
+    pub fn init(&mut self) {
+        self.outln("╔══════════════════════════════════════════════════════╗");
+        self.outln("║  NewDOS v0.1.1  —  bootloader 0.11  |  x86_64       ║");
+        self.outln("║  VESA VBE / UEFI GOP  |  Desktop GUI                ║");
+        self.outln("╚══════════════════════════════════════════════════════╝");
+        self.outln("Type 'pierre help' for commands.");
+        self.outln("");
+    }
+
+    // ── editor ────────────────────────────────────────────────────────────────
+
+    fn editor_draw(&mut self) {
+        self.outln("┌── editor ── F9=Save  F10=Exit ──────────────────────");
+        let buf = self.editor_buf.clone();
+        for line in buf.split('\n') {
+            let s = format!("│ {}", line);
+            self.outln(&s);
         }
+        self.outln("└─────────────────────────────────────────────────────");
     }
 
-    fn println(&self, s: &str) {
-        self.print(s);
-        self.print("\n");
-    }
-
-    pub fn prompt(&self) {
-        let p = format!("{}@{}:{}> ", self.username, self.device, self.cwd);
-        self.print(&p);
-    }
-
-    // ── editor ───────────────────────────────────────────────────────────────
-
-    fn editor_draw(&self) {
-        self.println("┌── editor ── F9=Save  F10=Exit ──");
-        for line in self.editor_buf.split('\n') {
-            self.print("│ ");
-            self.println(line);
-        }
-        self.println("└─────────────────────────────────");
-    }
-
-    fn enter_editor(&mut self, path: &str) {
+    pub fn enter_editor(&mut self, path: &str) {
         let content = match self.fs.read_file(path) {
-            Ok(b) => core::str::from_utf8(b).unwrap_or("").to_string(),
+            Ok(b)  => core::str::from_utf8(b).unwrap_or("").to_string(),
             Err(_) => String::new(),
         };
         self.editor_file = Some(path.to_string());
@@ -93,34 +124,57 @@ impl ShellState {
         self.editor_draw();
     }
 
-    fn editor_input(&mut self, c: char) {
+    // ── handle one character of input ─────────────────────────────────────────
+
+    pub fn process_char(&mut self, c: char) {
+        if self.editor_file.is_some() {
+            match c {
+                '\x08' => { self.editor_buf.pop(); }
+                _       => { self.editor_buf.push(c); }
+            }
+            return;
+        }
         match c {
-            '\x08' => { self.editor_buf.pop(); }
-            _       => { self.editor_buf.push(c); }
+            '\n' | '\r' => {
+                let cmd = core::mem::take(&mut self.output.input);
+                let prompt = self.prompt_string();
+                let echo = format!("{}{}", prompt, cmd);
+                self.outln(&echo);
+                self.dispatch(&cmd);
+            }
+            '\x08' => { self.output.input.pop(); }
+            c if c.is_ascii() && !c.is_control() => { self.output.input.push(c); }
+            _ => {}
         }
     }
 
-    fn editor_save(&mut self) {
-        if let Some(ref path) = self.editor_file.clone() {
-            match self.fs.write_file(path, &self.editor_buf.clone()) {
-                Ok(_)  => self.println("Saved."),
-                Err(e) => self.println(e),
+    pub fn process_special(&mut self, k: SpecialKey) {
+        if self.editor_file.is_some() {
+            match k {
+                SpecialKey::F9  => {
+                    if let Some(ref path) = self.editor_file.clone() {
+                        let buf = self.editor_buf.clone();
+                        match self.fs.write_file(path, &buf) {
+                            Ok(_)  => self.outln("Saved."),
+                            Err(e) => self.outln(e),
+                        }
+                    }
+                }
+                SpecialKey::F10 => {
+                    self.editor_file = None;
+                    self.editor_buf  = String::new();
+                    self.outln("Editor closed.");
+                }
+                _ => {}
             }
         }
-    }
-
-    fn editor_exit(&mut self) {
-        self.editor_file = None;
-        self.editor_buf  = String::new();
-        self.println("Editor closed.");
-        self.prompt();
     }
 
     // ── command dispatch ──────────────────────────────────────────────────────
 
     fn dispatch(&mut self, raw: &str) {
         let raw = raw.trim();
-        if raw.is_empty() { self.prompt(); return; }
+        if raw.is_empty() { return; }
 
         let (role, rest) = if let Some(r) = raw.strip_prefix("pierre ") {
             ("pierre", r)
@@ -129,8 +183,7 @@ impl ShellState {
         } else if raw == "pierre" || raw == "suppiere" {
             (raw, "")
         } else {
-            self.println("Unknown command. Type 'pierre help'.");
-            self.prompt();
+            self.outln("Unknown command. Type 'pierre help'.");
             return;
         };
 
@@ -140,296 +193,154 @@ impl ShellState {
         let arg2 = args.get(2).copied().unwrap_or("");
 
         match (role, cmd) {
-            // ── help ──────────────────────────────────────────────────────────
             (_, "help") | (_, "") => {
-                self.println("NewDOS shell commands");
-                self.println("─────────────────────────────────────────────");
-                self.println("  pierre help           this help");
-                self.println("  pierre ls / dir       list directory");
-                self.println("  pierre mkdir <path>   create directory");
-                self.println("  pierre touch <path>   create file");
-                self.println("  pierre write <f> <d>  write data to file");
-                self.println("  pierre cat <path>     read file");
-                self.println("  pierre del <path>     delete file/dir");
-                self.println("  pierre cls            clear screen");
-                self.println("  pierre mem            memory info");
-                self.println("  pierre storage        storage detection");
-                self.println("  pierre gpt            GPT struct info");
-                self.println("  pierre exfat          exFAT struct info");
-                self.println("  pierre time           show RTC time");
-                self.println("  pierre tz <+/-N>      set timezone");
-                self.println("  pierre edit <file>    open editor (F9=save F10=exit)");
-                self.println("  pierre user <name>    set username");
-                self.println("  pierre device <name>  set device name");
-                self.println("  pierre whoami         show role");
-                self.println("  pierre version        kernel version");
-                self.println("  pierre banner         print boot banner");
-                self.println("  pierre cd <path>      change directory");
-                self.println("  suppiere gfx          redraw framebuffer demo");
-                self.println("  suppiere restart      reboot system");
+                self.outln("NewDOS shell — commands:");
+                self.outln("  pierre help / ls / dir / mkdir / touch / write / cat / del");
+                self.outln("  pierre cls / mem / storage / gpt / exfat / version / banner");
+                self.outln("  pierre time / tz <+N> / edit <file> / cd / user / device");
+                self.outln("  suppiere gfx / suppiere restart");
             }
-
-            // ── filesystem ────────────────────────────────────────────────────
             (_, "ls") | (_, "dir") => {
                 let path = if arg1.is_empty() { self.cwd.clone() } else { arg1.to_string() };
-                match self.fs.list(&path) {
+                let listing: Vec<String> = match self.fs.list(&path) {
                     Ok(entries) => {
                         if entries.is_empty() {
-                            self.println("(empty)");
+                            alloc::vec!["  (empty)".to_string()]
                         } else {
-                            for e in entries {
+                            entries.iter().map(|e| {
                                 let tag = if e.is_dir() { "<DIR> " } else { "      " };
-                                self.println(&format!("  {}{}", tag, e.name()));
-                            }
+                                format!("  {}{}", tag, e.name())
+                            }).collect()
                         }
                     }
-                    Err(e) => self.println(e),
-                }
+                    Err(e) => alloc::vec![e.to_string()],
+                };
+                for line in listing { self.outln(&line); }
             }
-
             (_, "mkdir") => {
                 let path = self.abs(arg1);
                 match self.fs.mkdir(&path) {
-                    Ok(_)  => self.println(&format!("Created directory: {}", path)),
-                    Err(e) => self.println(e),
+                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); }
+                    Err(e) => self.outln(e),
                 }
             }
-
             (_, "touch") => {
                 let path = self.abs(arg1);
                 match self.fs.touch(&path) {
-                    Ok(_)  => self.println(&format!("Created file: {}", path)),
-                    Err(e) => self.println(e),
+                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); }
+                    Err(e) => self.outln(e),
                 }
             }
-
             (_, "write") => {
                 let path = self.abs(arg1);
                 match self.fs.write_file(&path, arg2) {
-                    Ok(_)  => self.println("Written."),
-                    Err(e) => self.println(e),
+                    Ok(_)  => self.outln("Written."),
+                    Err(e) => self.outln(e),
                 }
             }
-
             (_, "cat") => {
                 let path = self.abs(arg1);
                 match self.fs.read_file(&path) {
                     Ok(data) => {
-                        match core::str::from_utf8(data) {
-                            Ok(s)  => self.println(s),
-                            Err(_) => self.println("(binary data)"),
-                        }
+                        let s = core::str::from_utf8(data).unwrap_or("(binary)").to_string();
+                        self.outln(&s);
                     }
-                    Err(e) => self.println(e),
+                    Err(e) => self.outln(e),
                 }
             }
-
             (_, "del") => {
                 let path = self.abs(arg1);
                 match self.fs.delete(&path) {
-                    Ok(_)  => self.println("Deleted."),
-                    Err(e) => self.println(e),
+                    Ok(_)  => self.outln("Deleted."),
+                    Err(e) => self.outln(e),
                 }
             }
-
             (_, "cd") => {
                 let path = self.abs(arg1);
                 if path == "/" || self.fs.exists(&path) {
                     self.cwd = path;
                 } else {
-                    self.println("No such directory.");
+                    self.outln("No such directory.");
                 }
             }
-
-            // ── editor ────────────────────────────────────────────────────────
             (_, "edit") => {
                 let path = self.abs(arg1);
-                if !self.fs.exists(&path) {
-                    let _ = self.fs.touch(&path);
-                }
+                if !self.fs.exists(&path) { let _ = self.fs.touch(&path); }
                 self.enter_editor(&path.clone());
-                return; // don't print prompt yet
             }
-
-            // ── system info ───────────────────────────────────────────────────
-            (_, "cls") => {
-                if let Some(w) = framebuffer::FB_WRITER.lock().as_mut() {
-                    w.clear(crate::framebuffer::Rgb::DARKBG);
-                } else {
-                    crate::vga::WRITER.lock().clear_screen();
-                }
-            }
-
+            (_, "cls") => { self.output.lines.clear(); }
             (_, "mem") => {
-                self.println("Memory regions provided by bootloader 0.11:");
-                self.println("  (Region detail requires passing BootInfo to shell)");
-                let heap_used = {
-                    // Approximate: allocator reports usage via linked_list_allocator
-                    0usize // placeholder
-                };
-                let _ = heap_used;
-                self.println(&format!("  Heap: {} KiB reserved at 0x{:X}", crate::allocator::HEAP_SIZE / 1024, crate::allocator::HEAP_START));
+                let s = format!("Heap: {} KiB at 0x{:X}", crate::allocator::HEAP_SIZE / 1024, crate::allocator::HEAP_START);
+                self.outln(&s);
             }
-
             (_, "storage") => {
-                if storage::detect_ahci() {
-                    self.println("AHCI controller detected (SATA/SSD present).");
-                } else {
-                    self.println("No AHCI controller detected.");
-                }
+                if storage::detect_ahci() { self.outln("AHCI detected."); }
+                else { self.outln("No AHCI controller."); }
             }
-
             (_, "gpt") => {
-                self.println("GPT header struct (no disk driver; layout reference):");
-                self.println(&format!("  Signature field size: {} bytes", core::mem::size_of::<[u8;8]>()));
-                self.println(&format!("  Full GptHeader size:  {} bytes", core::mem::size_of::<storage::GptHeader>()));
-                self.println("  Signature: EFI PART");
+                let s = format!("GptHeader size: {} bytes", core::mem::size_of::<storage::GptHeader>());
+                self.outln(&s);
             }
-
             (_, "exfat") => {
-                self.println("exFAT boot sector struct (no disk driver; layout reference):");
-                self.println(&format!("  Boot sector size: {} bytes", core::mem::size_of::<storage::ExfatBootSector>()));
+                let s = format!("ExfatBootSector size: {} bytes", core::mem::size_of::<storage::ExfatBootSector>());
+                self.outln(&s);
             }
-
-            (_, "version") => {
-                self.println("NewDOS v0.1.1 (bootloader 0.11 / VESA+GOP framebuffer build)");
-            }
-
-            (_, "banner") => {
-                self.print_banner();
-            }
-
-            (_, "whoami") => {
-                self.println(role);
-            }
-
-            (_, "user") => {
+            (_, "version") => { self.outln("NewDOS v0.1.1 (bootloader 0.11 / GUI)"); }
+            (_, "banner")  => { self.outln("NewDOS v0.1.1 — bootloader 0.11 | x86_64 | VESA/GOP"); }
+            (_, "whoami")  => { self.outln(role); }
+            (_, "user")    => {
                 if arg1.is_empty() {
-                    self.println(&format!("Current user: {}", self.username));
+                    let s = format!("User: {}", self.username);
+                    self.outln(&s);
                 } else {
                     self.username = arg1.to_string();
-                    self.println(&format!("Username set to: {}", self.username));
+                    let s = format!("Username: {}", self.username);
+                    self.outln(&s);
                 }
             }
-
-            (_, "device") => {
+            (_, "device")  => {
                 if arg1.is_empty() {
-                    self.println(&format!("Device: {}", self.device));
+                    let s = format!("Device: {}", self.device);
+                    self.outln(&s);
                 } else {
                     self.device = arg1.to_string();
-                    self.println(&format!("Device name set to: {}", self.device));
+                    let s = format!("Device: {}", self.device);
+                    self.outln(&s);
                 }
             }
-
-            // ── time ──────────────────────────────────────────────────────────
             (_, "time") => {
                 let (gmt, loc) = time::formatted_times();
-                self.println(&format!("GMT:   {}", time::time_str(&gmt)));
-                self.println(&format!("Local: {}", time::time_str(&loc)));
+                let s = format!("GMT: {}  Local: {}", time::time_str(&gmt), time::time_str(&loc));
+                self.outln(&s);
             }
-
             (_, "tz") => {
-                if arg1.is_empty() {
-                    self.println(&format!("Timezone: UTC{:+}", time::get_timezone()));
-                } else {
-                    let offset: i8 = arg1.parse().unwrap_or(0);
-                    time::set_timezone(offset);
-                    self.tz_offset = offset;
-                    self.println(&format!("Timezone set to UTC{:+}", offset));
-                }
+                let offset: i8 = arg1.parse().unwrap_or(0);
+                time::set_timezone(offset);
+                let s = format!("Timezone: UTC{:+}", offset);
+                self.outln(&s);
             }
-
-            // ── admin (suppiere) ──────────────────────────────────────────────
             ("suppiere", "gfx") => {
-                framebuffer::redraw_demo();
-                self.println("Framebuffer demo redrawn.");
+                crate::framebuffer::redraw_demo();
+                self.outln("Framebuffer demo drawn.");
             }
-
             ("suppiere", "restart") => {
-                self.println("Restarting...");
+                self.outln("Restarting...");
                 unsafe {
-                    let mut port: x86_64::instructions::port::Port<u8> =
+                    let mut p: x86_64::instructions::port::Port<u8> =
                         x86_64::instructions::port::Port::new(0x64);
-                    port.write(0xFE);
+                    p.write(0xFE);
                 }
             }
-
-            // ── unknown ───────────────────────────────────────────────────────
             _ => {
-                self.println(&format!("Unknown command: '{}'. Try 'pierre help'.", raw));
+                let s = format!("Unknown: '{}'. Try 'pierre help'.", raw);
+                self.outln(&s);
             }
         }
-
-        self.prompt();
     }
 
     fn abs(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            path.to_string()
-        } else if self.cwd == "/" {
-            format!("/{}", path)
-        } else {
-            format!("{}/{}", self.cwd, path)
-        }
-    }
-
-    fn print_banner(&self) {
-        self.println("╔══════════════════════════════════════════════════════╗");
-        self.println("║  NewDOS v0.1.1  —  bootloader 0.11  |  x86_64       ║");
-        self.println("║  VESA VBE / UEFI GOP framebuffer  (HDMI / DP / VGA) ║");
-        self.println("║  Type 'pierre help' for commands.                   ║");
-        self.println("╚══════════════════════════════════════════════════════╝");
-    }
-
-    // ── main tick (called from kernel main loop) ──────────────────────────────
-
-    pub fn tick(&mut self) {
-        // Editor mode
-        if self.editor_file.is_some() {
-            if let Some(k) = pop_special() {
-                match k {
-                    SpecialKey::F9  => self.editor_save(),
-                    SpecialKey::F10 => self.editor_exit(),
-                    _ => {}
-                }
-            }
-            if let Some(c) = pop_char() {
-                self.editor_input(c);
-            }
-            return;
-        }
-
-        // Normal shell mode
-        if let Some(c) = pop_char() {
-            match c {
-                '\n' | '\r' => {
-                    self.print("\n");
-                    let cmd = core::mem::take(&mut self.line);
-                    self.dispatch(&cmd);
-                }
-                '\x08' => {
-                    // backspace
-                    if !self.line.is_empty() {
-                        self.line.pop();
-                        self.print("\x08 \x08");
-                    }
-                }
-                c if c.is_ascii() && !c.is_control() => {
-                    self.line.push(c);
-                    let s = format!("{}", c);
-                    self.print(&s);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub fn init(&mut self) {
-        self.print_banner();
-        self.println("");
-        self.println("Video: VESA VBE (BIOS) / UEFI GOP -> HDMI / DisplayPort / VGA");
-        self.println("Bootloader: 0.11 |  Arch: x86_64");
-        self.println("");
-        self.prompt();
+        if path.starts_with('/') { path.to_string() }
+        else if self.cwd == "/" { format!("/{}", path) }
+        else { format!("{}/{}", self.cwd, path) }
     }
 }
