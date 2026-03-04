@@ -263,7 +263,7 @@ impl FbWriter {
         };
         for row in 0..8usize {
             for col in 0..8usize {
-                let bit = (glyph[row] >> (7 - col)) & 1;
+                let bit = (glyph[row] >> col) & 1;  // font is LSB-first (leftmost pixel = bit 0)
                 self.draw_pixel(x + col, y + row, if bit != 0 { fg } else { bg });
             }
         }
@@ -290,7 +290,7 @@ impl FbWriter {
             };
             for row in 0..8usize {
                 for col in 0..8usize {
-                    let bit = (glyph[row] >> (7 - col)) & 1;
+                    let bit = (glyph[row] >> col) & 1;  // LSB-first
                     let c = if bit != 0 { fg } else { bg };
                     self.fill_rect(cur_x + col * scale, y + row * scale, scale, scale, c);
                 }
