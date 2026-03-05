@@ -83,8 +83,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         (1024, 768)
     };
 
+    keyboard::init();
+    serial_println!("[OK] Keyboard (PS/2 port 1 enabled)");
+
     mouse::init();
-    serial_println!("[OK] Mouse");
+    serial_println!("[OK] Mouse (PS/2 port 2 enabled)");
 
     // ── Boot menu ─────────────────────────────────────────────────────────────
     framebuffer::draw_boot_menu();

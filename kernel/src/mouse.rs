@@ -40,8 +40,8 @@ pub fn init() {
         wait_wr(&mut cmd); cmd.write(0x20);
         wait_rd(&mut cmd);                      // ← wait for data to arrive
         let mut cfg = data.read();
-        cfg |= 0x02;                            // enable IRQ12
-        cfg &= !0x20;                           // enable mouse clock
+        cfg |= 0x03;                            // enable IRQ1 (keyboard) and IRQ12 (mouse)
+        cfg &= !0x20;                           // enable mouse clock (clear "disable" bit)
 
         // Write updated config back
         wait_wr(&mut cmd); cmd.write(0x60);

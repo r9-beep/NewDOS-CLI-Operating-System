@@ -2,6 +2,29 @@ use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, Scancod
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
+// ── Initialization ────────────────────────────────────────────────────────────
+
+/// Enable PS/2 port 1 (keyboard) via the 8042 controller.
+/// The BIOS usually leaves the keyboard enabled, but calling this explicitly
+/// makes initialization deterministic and independent of firmware state.
+pub fn init() {
+    let mut cmd:  Port<u8> = Port::new(0x64);
+    let mut data: Port<u8> = Port::new(0x60);
+    unsafe {
+        // Enable first PS/2 port (keyboard)
+        wait_wr(&mut cmd); cmd.write(0xAE);
+
+        // Flush any pending byte in the output buffer
+        if cmd.read() & 0x01 != 0 { let _ = data.read(); }
+    }
+}
+
+fn wait_wr(cmd: &mut Port<u8>) {
+    for _ in 0..100_000u32 {
+        if unsafe { cmd.read() } & 0x02 == 0 { return; }
+    }
+}
+
 // ── SpecialKey ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]

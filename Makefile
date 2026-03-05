@@ -27,6 +27,7 @@ run-bios: bios
 	    -drive format=raw,file=$(OUT_DIR)/NewDOS-bios.img \
 	    -m 256M \
 	    -serial stdio \
+	    -device ps2-mouse \
 	    -no-reboot
 
 run-uefi: uefi
@@ -35,6 +36,7 @@ run-uefi: uefi
 	    -drive format=raw,file=$(OUT_DIR)/NewDOS-uefi.img \
 	    -m 256M \
 	    -serial stdio \
+	    -device ps2-mouse \
 	    -no-reboot
 
 clean:

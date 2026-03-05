@@ -92,6 +92,15 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_frame: InterruptStackFrame) {
 
 pub fn init() {
     init_idt();
-    unsafe { PICS.lock().initialize() }
+    unsafe {
+        PICS.lock().initialize();
+        // Explicitly set PIC masks so our IRQs are unmasked regardless of what
+        // the firmware left behind.  initialize() saves+restores the original
+        // masks, so if the BIOS masked IRQ12 (mouse) we must override it here.
+        //
+        //   PIC1  0xF8 = 1111_1000 → unmask IRQ0 (timer), IRQ1 (kbd), IRQ2 (cascade)
+        //   PIC2  0xEF = 1110_1111 → unmask IRQ12 (mouse = PIC2 line 4)
+        PICS.lock().write_masks(0xF8, 0xEF);
+    }
     x86_64::instructions::interrupts::enable();
 }
