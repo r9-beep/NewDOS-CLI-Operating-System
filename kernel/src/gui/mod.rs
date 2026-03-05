@@ -29,7 +29,7 @@ impl Gui {
     pub fn new(screen_w: usize, screen_h: usize) -> Self {
         mouse::set_bounds(screen_w, screen_h);
 
-        let mut sh = shell::ShellState::new();
+        let mut sh = shell::ShellState::new_from_disk();
         sh.init();
 
         let mut gui = Gui {
@@ -221,7 +221,7 @@ impl Gui {
         let off = (self.windows.len() as i32) * 30;
         let (title, content, w, h) = match kind {
             desktop::IconKind::Terminal => {
-                let mut sh_state = shell::ShellState::new();
+                let mut sh_state = shell::ShellState::new_from_disk();
                 sh_state.init();
                 ("Terminal", WindowContent::Terminal(sh_state),
                  sw * 6 / 10, sh * 6 / 10)

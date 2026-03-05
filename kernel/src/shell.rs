@@ -86,8 +86,18 @@ impl ShellState {
         }
     }
 
+    /// Like `new()` but tries to restore the VFS from the on-disk data area.
+    pub fn new_from_disk() -> Self {
+        let mut s = Self::new();
+        if let Some(fs) = crate::disk_store::load() { s.fs = fs; }
+        s
+    }
+
     fn out(&mut self, s: &str) { self.output.push_str(s); }
     fn outln(&mut self, s: &str) { self.output.push_str(s); self.output.push_str("\n"); }
+
+    /// Persist the in-memory VFS to disk.  Silently no-ops if no ATA drive present.
+    fn disk_sync(&self) { crate::disk_store::save(&self.fs); }
 
     pub fn prompt_string(&self) -> String {
         format!("{}@{}:{}> ", self.username, self.device, self.cwd)
@@ -155,7 +165,7 @@ impl ShellState {
                     if let Some(ref path) = self.editor_file.clone() {
                         let buf = self.editor_buf.clone();
                         match self.fs.write_file(path, &buf) {
-                            Ok(_)  => self.outln("Saved."),
+                            Ok(_)  => { self.outln("Saved."); self.disk_sync(); }
                             Err(e) => self.outln(e),
                         }
                     }
@@ -198,6 +208,7 @@ impl ShellState {
                 self.outln("  pierre help / ls / dir / mkdir / touch / write / cat / del");
                 self.outln("  pierre cls / mem / storage / gpt / exfat / version / banner");
                 self.outln("  pierre time / tz <+N> / edit <file> / cd / user / device");
+                self.outln("  pierre sync  (force filesystem flush to disk)");
                 self.outln("  suppiere gfx / suppiere restart");
             }
             (_, "ls") | (_, "dir") => {
@@ -220,21 +231,21 @@ impl ShellState {
             (_, "mkdir") => {
                 let path = self.abs(arg1);
                 match self.fs.mkdir(&path) {
-                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); }
+                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); self.disk_sync(); }
                     Err(e) => self.outln(e),
                 }
             }
             (_, "touch") => {
                 let path = self.abs(arg1);
                 match self.fs.touch(&path) {
-                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); }
+                    Ok(_)  => { let s = format!("Created: {}", path); self.outln(&s); self.disk_sync(); }
                     Err(e) => self.outln(e),
                 }
             }
             (_, "write") => {
                 let path = self.abs(arg1);
                 match self.fs.write_file(&path, arg2) {
-                    Ok(_)  => self.outln("Written."),
+                    Ok(_)  => { self.outln("Written."); self.disk_sync(); }
                     Err(e) => self.outln(e),
                 }
             }
@@ -251,9 +262,13 @@ impl ShellState {
             (_, "del") => {
                 let path = self.abs(arg1);
                 match self.fs.delete(&path) {
-                    Ok(_)  => self.outln("Deleted."),
+                    Ok(_)  => { self.outln("Deleted."); self.disk_sync(); }
                     Err(e) => self.outln(e),
                 }
+            }
+            (_, "sync") => {
+                self.disk_sync();
+                self.outln("Filesystem synced to disk.");
             }
             (_, "cd") => {
                 let path = self.abs(arg1);

@@ -10,7 +10,9 @@ use bootloader_api::config::Mapping;
 use x86_64::VirtAddr;
 
 pub mod allocator;
+pub mod ata;
 pub mod cli;
+pub mod disk_store;
 pub mod framebuffer;
 pub mod gdt;
 pub mod gui;
@@ -88,6 +90,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     mouse::init();
     serial_println!("[OK] Mouse (PS/2 port 2 enabled)");
+
+    // Probe ATA: print whether the primary IDE drive responds.
+    {
+        let mut probe = [0u8; 512];
+        if ata::read_sectors(0, 1, &mut probe) {
+            serial_println!("[OK] ATA primary disk — data area at LBA 8192");
+        } else {
+            serial_println!("[WARN] ATA primary disk not found — filesystem not persistent");
+        }
+    }
 
     // ── Boot menu ─────────────────────────────────────────────────────────────
     framebuffer::draw_boot_menu();

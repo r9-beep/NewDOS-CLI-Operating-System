@@ -21,10 +21,9 @@ pub struct CliMode {
 
 impl CliMode {
     pub fn new() -> Self {
-        let mut sh = ShellState::new();
+        let mut sh = ShellState::new_from_disk();
         sh.init();
-        let mut m = CliMode { shell: sh, dirty: true };
-        m
+        CliMode { shell: sh, dirty: true }
     }
 
     pub fn tick(&mut self) {

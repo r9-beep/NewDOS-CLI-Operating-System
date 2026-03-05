@@ -159,4 +159,33 @@ impl FileSystem {
         let parts = Self::split_path(path);
         find(&self.root, &parts)
     }
+
+    /// Walk the entire tree and return `(full_path, is_dir, data)` for every
+    /// node.  Directories are emitted before their children so a deserialiser
+    /// can recreate the tree in a single forward pass.
+    pub fn walk_all(&self) -> alloc::vec::Vec<(alloc::string::String, bool, alloc::vec::Vec<u8>)> {
+        let mut out = alloc::vec::Vec::new();
+        if let Entry::Dir { children, .. } = &self.root {
+            for child in children { walk_entry(child, "", &mut out); }
+        }
+        out
+    }
+}
+
+fn walk_entry(
+    entry: &Entry,
+    prefix: &str,
+    out: &mut alloc::vec::Vec<(alloc::string::String, bool, alloc::vec::Vec<u8>)>,
+) {
+    use alloc::format;
+    let full = format!("{}/{}", prefix, entry.name());
+    match entry {
+        Entry::Dir { children, .. } => {
+            out.push((full.clone(), true, alloc::vec::Vec::new()));
+            for child in children { walk_entry(child, &full, out); }
+        }
+        Entry::File { data, .. } => {
+            out.push((full, false, data.clone()));
+        }
+    }
 }
