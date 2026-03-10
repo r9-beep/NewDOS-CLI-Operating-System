@@ -70,16 +70,20 @@ The editor uses **F9** to save and **F10** to exit.
 
 ## GUI Launcher
 
-A graphical launcher is included in `gui/` — no extra dependencies beyond Python 3 with tkinter.
+```bash
+pierre gui
+```
+
+That's it. The `pierre` script in the repo root mirrors the in-kernel command prefix on your host machine.
+
+`pierre gui` will use the pre-compiled `NewDOSLauncher.bin` if present, and fall back to the Python source in `gui/` automatically.
 
 ```bash
-# make the script executable once
-chmod +x gui/launch_gui.sh
+# make pierre executable once
+chmod +x pierre
 
-# then launch
-./gui/launch_gui.sh
-# or directly
-python3 gui/newdos_launcher.py
+# then just run
+./pierre gui
 ```
 
 **Features of the launcher:**
@@ -90,6 +94,13 @@ python3 gui/newdos_launcher.py
 - **About tab** — project info, ASCII logo, build-from-source instructions
 
 Requires `qemu-system-x86_64` on your PATH (`sudo apt install qemu-system-x86`).
+
+> To recompile `NewDOSLauncher.bin` from source:
+> ```bash
+> pip install pyinstaller
+> pyinstaller --onefile --noconsole --name NewDOSLauncher gui/newdos_launcher.py
+> cp dist/NewDOSLauncher NewDOSLauncher.bin
+> ```
 
 ---
 

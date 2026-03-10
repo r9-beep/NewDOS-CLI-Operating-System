@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# pierre — host-side NewDOS command launcher
+# Usage: pierre <command> [args...]
+#
+# Mirrors the in-kernel 'pierre' CLI prefix on the host machine.
+# Currently supported commands:
+#   pierre gui    — launch the NewDOS GUI launcher
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CMD="${1:-}"
+
+case "$CMD" in
+    gui)
+        # Prefer the compiled binary if present, fall back to Python source
+        if [ -x "$SCRIPT_DIR/NewDOSLauncher.bin" ]; then
+            exec "$SCRIPT_DIR/NewDOSLauncher.bin"
+        elif [ -f "$SCRIPT_DIR/gui/newdos_launcher.py" ]; then
+            exec python3 "$SCRIPT_DIR/gui/newdos_launcher.py"
+        else
+            echo "pierre: GUI launcher not found." >&2
+            exit 1
+        fi
+        ;;
+    ""|help)
+        echo "Usage: pierre <command>"
+        echo ""
+        echo "Host commands:"
+        echo "  pierre gui    Launch the NewDOS GUI launcher"
+        echo ""
+        echo "Kernel commands (run inside QEMU):"
+        echo "  pierre help / dir / ls / mkdir / touch / write / cat / del"
+        echo "  pierre mem / gpt / exfat / tui / edit / time / tz / cd"
+        echo "  pierre user / device"
+        ;;
+    *)
+        echo "pierre: unknown command '$CMD'" >&2
+        echo "Run 'pierre help' for usage." >&2
+        exit 1
+        ;;
+esac
