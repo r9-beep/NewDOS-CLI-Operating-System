@@ -68,6 +68,31 @@ In settings, **Q/E** adjust the timezone and the console accepts `user <name>` a
 
 The editor uses **F9** to save and **F10** to exit.
 
+## GUI Launcher
+
+A graphical launcher is included in `gui/` — no extra dependencies beyond Python 3 with tkinter.
+
+```bash
+# make the script executable once
+chmod +x gui/launch_gui.sh
+
+# then launch
+./gui/launch_gui.sh
+# or directly
+python3 gui/newdos_launcher.py
+```
+
+**Features of the launcher:**
+
+- **Launch tab** — pick kernel version (v0.1.2 / v0.1.3), one-click LAUNCH / STOP
+- **Config tab** — set RAM amount, QEMU display backend, extra flags, live command preview
+- **Output tab** — live QEMU stdout/stderr feed with a clear button
+- **About tab** — project info, ASCII logo, build-from-source instructions
+
+Requires `qemu-system-x86_64` on your PATH (`sudo apt install qemu-system-x86`).
+
+---
+
 ## Build and run in QEMU (BIOS)
 
 You need the Rust nightly toolchain and the `bootimage` tool:
