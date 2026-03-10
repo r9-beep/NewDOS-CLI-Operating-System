@@ -1,509 +1,478 @@
 #!/usr/bin/env python3
-"""NewDOS GUI Launcher — graphical launcher for the NewDOS Base Kernel."""
+"""
+NewDOS — Graphical Desktop Environment
+Boots the NewDOS kernel in QEMU and provides a full desktop shell:
+taskbar, console, file manager, and settings.
+"""
 
 import subprocess
 import threading
 import shutil
+import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 # ---------------------------------------------------------------------------
-# Colour palette (dark terminal aesthetic)
+# Paths
 # ---------------------------------------------------------------------------
-BG_DARK    = "#0d1117"
-BG_MID     = "#161b22"
-BG_LIGHT   = "#21262d"
-BORDER     = "#30363d"
-TEXT_PRI   = "#e6edf3"
-TEXT_SEC   = "#8b949e"
-BLUE       = "#58a6ff"
-GREEN      = "#3fb950"
-RED        = "#f85149"
-YELLOW     = "#d29922"
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+KERNELS  = {
+    "v0.1.3": BASE_DIR / "NewDOSv0_1_3.bin",
+    "v0.1.2": BASE_DIR / "NewDOSv0_1_2.bin",
+}
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Palette
+# ---------------------------------------------------------------------------
+BG      = "#0a0e14"
+PANEL   = "#0d1117"
+CARD    = "#161b22"
+SURFACE = "#21262d"
+BORDER  = "#30363d"
+BLUE    = "#58a6ff"
+GREEN   = "#3fb950"
+RED     = "#f85149"
+MUTED   = "#8b949e"
+TEXT    = "#e6edf3"
+WHITE   = "#ffffff"
+
+MONO  = ("Courier New", 10)
+SMALL = ("Courier New", 9)
+BOLD  = ("Courier New", 11, "bold")
+
+
+# ---------------------------------------------------------------------------
+# Boot animation (splash screen)
 # ---------------------------------------------------------------------------
 
-def _lbl(parent, text, fg=TEXT_PRI, bg=BG_LIGHT, font=("Courier New", 10), **kw):
-    return tk.Label(parent, text=text, fg=fg, bg=bg, font=font, **kw)
+class BootSplash(tk.Toplevel):
+    LOGO = [
+        "  ███╗   ██╗███████╗██╗    ██╗██████╗  ██████╗ ███████╗",
+        "  ████╗  ██║██╔════╝██║    ██║██╔══██╗██╔═══██╗██╔════╝",
+        "  ██╔██╗ ██║█████╗  ██║ █╗ ██║██║  ██║██║   ██║███████╗",
+        "  ██║╚██╗██║██╔══╝  ██║███╗██║██║  ██║██║   ██║╚════██║",
+        "  ██║ ╚████║███████╗╚███╔███╔╝██████╔╝╚██████╔╝███████║",
+        "  ╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝ ╚═════╝  ╚═════╝ ╚══════╝",
+    ]
+    STEPS = [
+        (0.15, "Loading bootloader…"),
+        (0.35, "Mapping memory…"),
+        (0.55, "Starting interrupt handlers…"),
+        (0.70, "Mounting in-memory filesystem…"),
+        (0.85, "Starting CLI shell…"),
+        (1.00, "Launching QEMU…"),
+    ]
 
+    def __init__(self, master, version):
+        super().__init__(master)
+        self.overrideredirect(True)
+        w, h = 640, 340
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self.configure(bg=BG)
+        self.lift(); self.focus_force()
 
-def _card(parent, title):
-    """Return a framed card with a blue header; also return its inner frame."""
-    card = tk.Frame(parent, bg=BG_LIGHT)
-    tk.Label(card, text=f"  {title}", bg=BG_LIGHT, fg=BLUE,
-             font=("Courier New", 11, "bold"), anchor="w",
-             pady=7, padx=6).pack(fill="x")
-    tk.Frame(card, bg=BORDER, height=1).pack(fill="x")
-    inner = tk.Frame(card, bg=BG_LIGHT)
-    inner.pack(fill="both", expand=True, padx=12, pady=8)
-    return card, inner
+        tk.Label(self, text="\n".join(self.LOGO), bg=BG, fg=BLUE,
+                 font=("Courier New", 9, "bold"), justify="left").pack(pady=(30, 0))
+        tk.Label(self, text=f"NewDOS Base Kernel {version}",
+                 bg=BG, fg=MUTED, font=MONO).pack(pady=(10, 0))
+
+        self._canvas = tk.Canvas(self, width=400, height=6, bg=SURFACE,
+                                 highlightthickness=0)
+        self._canvas.pack(pady=24)
+        self._fill = self._canvas.create_rectangle(0, 0, 0, 6,
+                                                   fill=BLUE, outline="")
+        self._msg = tk.Label(self, text="", bg=BG, fg=MUTED, font=SMALL)
+        self._msg.pack()
+
+        self._i = 0
+        self._animate()
+
+    def _animate(self):
+        if self._i < len(self.STEPS):
+            pct, msg = self.STEPS[self._i]
+            self._i += 1
+            self._canvas.coords(self._fill, 0, 0, 400 * pct, 6)
+            self._msg.configure(text=msg)
+            self.after(250, self._animate)
+        else:
+            self.after(180, self.destroy)
 
 
 # ---------------------------------------------------------------------------
-# Main window
+# Console tab
 # ---------------------------------------------------------------------------
 
-class NewDOSLauncher(tk.Tk):
+class ConsoleTab(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=CARD)
 
-    # ---- init ---------------------------------------------------------------
+        hdr = tk.Frame(self, bg=CARD)
+        hdr.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(hdr, text="● CONSOLE", bg=CARD, fg=GREEN, font=SMALL).pack(side="left")
+        tk.Button(hdr, text="Clear", bg=CARD, fg=MUTED, font=SMALL,
+                  relief="flat", cursor="hand2",
+                  activebackground=SURFACE,
+                  command=self._clear).pack(side="right")
+
+        self.out = tk.Text(self, bg="#050810", fg=GREEN, font=MONO,
+                           relief="flat", padx=10, pady=8,
+                           insertbackground=GREEN, state="disabled",
+                           selectbackground=SURFACE, wrap="word")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.out.yview)
+        self.out.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.out.pack(fill="both", expand=True)
+
+    def write(self, text):
+        self.out.configure(state="normal")
+        self.out.insert("end", text)
+        self.out.see("end")
+        self.out.configure(state="disabled")
+
+    def _clear(self):
+        self.out.configure(state="normal")
+        self.out.delete("1.0", "end")
+        self.out.configure(state="disabled")
+
+
+# ---------------------------------------------------------------------------
+# Files tab
+# ---------------------------------------------------------------------------
+
+class FilesTab(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=CARD)
+
+        hdr = tk.Frame(self, bg=CARD)
+        hdr.pack(fill="x", padx=12, pady=(10, 6))
+        tk.Label(hdr, text="◈ FILES", bg=CARD, fg=BLUE, font=SMALL).pack(side="left")
+        tk.Label(hdr, text=str(BASE_DIR), bg=CARD, fg=MUTED,
+                 font=SMALL).pack(side="left", padx=(10, 0))
+
+        # Header row
+        row = tk.Frame(self, bg=SURFACE)
+        row.pack(fill="x", padx=12)
+        for col, w in [("Name", 34), ("Size", 10), ("Type", 12)]:
+            tk.Label(row, text=col, bg=SURFACE, fg=MUTED,
+                     font=("Courier New", 9, "bold"),
+                     width=w, anchor="w", padx=6, pady=4).pack(side="left")
+
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=12)
+
+        scroll = tk.Frame(self, bg=CARD)
+        scroll.pack(fill="both", expand=True, padx=12, pady=4)
+
+        for path in sorted(BASE_DIR.iterdir()):
+            if path.name.startswith("."):
+                continue
+            is_dir = path.is_dir()
+            size   = "-" if is_dir else self._fmt(path.stat().st_size)
+            ftype  = "Directory" if is_dir else (path.suffix.lstrip(".").upper() or "File")
+            icon   = "📁" if is_dir else "📄"
+            fg     = BLUE if path.suffix == ".bin" else TEXT
+
+            r = tk.Frame(scroll, bg=CARD)
+            r.pack(fill="x")
+            r.bind("<Enter>", lambda e, f=r: f.configure(bg=SURFACE))
+            r.bind("<Leave>", lambda e, f=r: f.configure(bg=CARD))
+
+            tk.Label(r, text=f"{icon}  {path.name}", bg=CARD, fg=fg,
+                     font=MONO, anchor="w", padx=6, pady=3,
+                     width=34).pack(side="left")
+            tk.Label(r, text=size,  bg=CARD, fg=MUTED,
+                     font=SMALL, anchor="w", width=10).pack(side="left")
+            tk.Label(r, text=ftype, bg=CARD, fg=MUTED,
+                     font=SMALL, anchor="w", width=12).pack(side="left")
+
+    @staticmethod
+    def _fmt(n):
+        for u in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.0f} {u}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+
+# ---------------------------------------------------------------------------
+# Settings tab
+# ---------------------------------------------------------------------------
+
+class SettingsTab(tk.Frame):
+    def __init__(self, master, desktop):
+        super().__init__(master, bg=CARD)
+        self.desktop = desktop
+        self._build()
+
+    def _build(self):
+        w = tk.Frame(self, bg=CARD)
+        w.pack(fill="both", expand=True, padx=24, pady=16)
+
+        def section(title):
+            tk.Label(w, text=title, bg=CARD, fg=BLUE,
+                     font=("Courier New", 10, "bold"), anchor="w").pack(
+                         fill="x", pady=(14, 2))
+            tk.Frame(w, bg=BORDER, height=1).pack(fill="x")
+
+        section("KERNEL VERSION")
+        vf = tk.Frame(w, bg=CARD)
+        vf.pack(fill="x", pady=6)
+        for label, val in [("v0.1.3 (latest)", "v0.1.3"), ("v0.1.2", "v0.1.2")]:
+            ok = KERNELS[val].exists()
+            tk.Radiobutton(vf, text=label,
+                           variable=self.desktop.version_var, value=val,
+                           bg=CARD, fg=TEXT if ok else MUTED, font=MONO,
+                           selectcolor=BG, activebackground=CARD,
+                           state="normal" if ok else "disabled").pack(
+                               side="left", padx=(0, 24))
+
+        section("MEMORY")
+        mf = tk.Frame(w, bg=CARD)
+        mf.pack(fill="x", pady=6)
+        tk.Label(mf, text="RAM (MB):", bg=CARD, fg=TEXT, font=MONO).pack(side="left")
+        tk.Spinbox(mf, from_=64, to=4096, increment=64,
+                   textvariable=self.desktop.memory_var, width=7,
+                   bg=SURFACE, fg=TEXT, font=MONO,
+                   buttonbackground=SURFACE, relief="flat").pack(
+                       side="left", padx=(10, 0))
+
+        section("DISPLAY BACKEND")
+        df = tk.Frame(w, bg=CARD)
+        df.pack(fill="x", pady=6)
+        for label, val in [("SDL", "sdl"), ("GTK", "gtk"),
+                           ("VNC :0", "vnc"), ("None", "none")]:
+            tk.Radiobutton(df, text=label,
+                           variable=self.desktop.display_var, value=val,
+                           bg=CARD, fg=TEXT, font=MONO,
+                           selectcolor=BG, activebackground=CARD).pack(
+                               side="left", padx=(0, 20))
+
+        section("EXTRA QEMU FLAGS")
+        ef = tk.Frame(w, bg=CARD)
+        ef.pack(fill="x", pady=6)
+        tk.Entry(ef, textvariable=self.desktop.flags_var, width=54,
+                 bg=SURFACE, fg=TEXT, font=MONO,
+                 insertbackground=TEXT, relief="flat").pack(side="left")
+
+        section("ABOUT")
+        for k, v in [
+            ("Architecture", "x86_64 — bare metal, ring 0"),
+            ("Language",     "Rust 2021 (nightly toolchain)"),
+            ("Bootloader",   "bootloader v0.9 — BIOS only"),
+            ("GUI",          "Python 3 + tkinter"),
+        ]:
+            r = tk.Frame(w, bg=CARD)
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=k, bg=CARD, fg=MUTED, font=SMALL,
+                     width=18, anchor="w").pack(side="left")
+            tk.Label(r, text=v, bg=CARD, fg=TEXT, font=SMALL,
+                     anchor="w").pack(side="left")
+
+
+# ---------------------------------------------------------------------------
+# Desktop
+# ---------------------------------------------------------------------------
+
+class NewDOSDesktop(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("NewDOS Launcher")
-        self.geometry("960x680")
-        self.minsize(720, 520)
-        self.configure(bg=BG_DARK)
+        self.title("NewDOS")
+        self.geometry("1100x720")
+        self.minsize(800, 560)
+        self.configure(bg=BG)
 
-        self.selected_version = tk.StringVar(value="v0.1.3")
-        self.memory_mb        = tk.IntVar(value=128)
-        self.display_mode     = tk.StringVar(value="sdl")
-        self.extra_flags      = tk.StringVar(value="")
-        self.process          = None
+        self.version_var = tk.StringVar(value="v0.1.3")
+        self.memory_var  = tk.IntVar(value=128)
+        self.display_var = tk.StringVar(value="sdl")
+        self.flags_var   = tk.StringVar(value="")
+        self.process     = None
 
         self._style()
-        self._header()
+        self._taskbar()
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
-        self._notebook()
+        self._workspace()
         self._statusbar()
-        self._check_qemu()
-
-    # ---- ttk style ----------------------------------------------------------
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _style(self):
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure("Dark.TNotebook",        background=BG_DARK,  tabmargins=[0,0,0,0])
-        s.configure("Dark.TNotebook.Tab",    background=BG_MID,   foreground=TEXT_SEC,
-                    font=("Courier New", 10), padding=[14, 6])
-        s.map("Dark.TNotebook.Tab",
-              background=[("selected", BG_LIGHT)],
+        s.configure("OS.TNotebook",     background=PANEL, tabmargins=[0, 0, 0, 0])
+        s.configure("OS.TNotebook.Tab", background=PANEL, foreground=MUTED,
+                    font=MONO, padding=[16, 8])
+        s.map("OS.TNotebook.Tab",
+              background=[("selected", CARD)],
               foreground=[("selected", BLUE)])
-        s.configure("Mid.TFrame",   background=BG_MID)
-        s.configure("Dark.TFrame",  background=BG_DARK)
-        s.configure("Card.TFrame",  background=BG_LIGHT)
-        s.configure("Dark.TRadiobutton", background=BG_LIGHT, foreground=TEXT_PRI,
-                    font=("Courier New", 10))
-        s.map("Dark.TRadiobutton", background=[("active", BG_LIGHT)])
 
-    # ---- header bar ---------------------------------------------------------
+    # ---- taskbar ------------------------------------------------------------
 
-    def _header(self):
-        bar = tk.Frame(self, bg=BG_DARK)
-        bar.pack(fill="x", padx=20, pady=(14, 10))
+    def _taskbar(self):
+        bar = tk.Frame(self, bg=PANEL, height=52)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
 
-        tk.Label(bar, text="NewDOS", bg=BG_DARK, fg=BLUE,
-                 font=("Courier New", 24, "bold")).pack(side="left")
-        tk.Label(bar, text=" GUI Launcher ", bg=BLUE, fg="#000",
-                 font=("Courier New", 10, "bold"), padx=4, pady=3).pack(
-                     side="left", padx=(8, 0), pady=(10, 0))
-        tk.Label(bar, text="  x86_64 bare-metal OS launcher",
-                 bg=BG_DARK, fg=TEXT_SEC,
-                 font=("Courier New", 10)).pack(side="left", pady=(10, 0))
+        tk.Label(bar, text="  NewDOS", bg=PANEL, fg=BLUE,
+                 font=("Courier New", 15, "bold")).pack(side="left", padx=(6, 16))
+        tk.Frame(bar, bg=BORDER, width=1).pack(side="left", fill="y", pady=10)
 
-    # ---- notebook -----------------------------------------------------------
-
-    def _notebook(self):
-        nb = ttk.Notebook(self, style="Dark.TNotebook")
-        nb.pack(fill="both", expand=True, padx=15, pady=(8, 0))
-
-        for title, builder in [
-            ("  Launch  ",  self._tab_launch),
-            ("  Config  ",  self._tab_config),
-            ("  Output  ",  self._tab_output),
-            ("  About   ",  self._tab_about),
-        ]:
-            tab = ttk.Frame(nb, style="Mid.TFrame")
-            nb.add(tab, text=title)
-            builder(tab)
-
-    # =========================================================================
-    # Tab: Launch
-    # =========================================================================
-
-    def _tab_launch(self, parent):
-        left  = tk.Frame(parent, bg=BG_MID)
-        right = tk.Frame(parent, bg=BG_MID)
-        left .pack(side="left",  fill="both", expand=True, padx=(15, 6), pady=15)
-        right.pack(side="right", fill="y",    padx=(6, 15), pady=15)
-
-        # -- version picker ---------------------------------------------------
-        vc, vi = _card(left, "SELECT VERSION")
-        vc.pack(fill="x", pady=(0, 10))
-
-        versions = [
-            ("NewDOS v0.1.3  (latest)", "v0.1.3", "NewDOSv0_1_3.bin"),
-            ("NewDOS v0.1.2",           "v0.1.2", "NewDOSv0_1_2.bin"),
-        ]
-        for label, val, fname in versions:
-            exists = (BASE_DIR / fname).exists()
-            row = tk.Frame(vi, bg=BG_LIGHT)
-            row.pack(fill="x", pady=3)
-            rb = ttk.Radiobutton(row, text=label, variable=self.selected_version,
-                                 value=val, style="Dark.TRadiobutton",
-                                 state="normal" if exists else "disabled")
-            rb.pack(side="left")
-            tk.Label(row, text="✓ found" if exists else "✗ missing",
-                     bg=BG_LIGHT, fg=GREEN if exists else RED,
-                     font=("Courier New", 9)).pack(side="right")
-
-        # -- feature list -----------------------------------------------------
-        fc, fi = _card(left, "KERNEL FEATURES")
-        fc.pack(fill="both", expand=True)
-
-        features = [
-            ("VGA Text Mode",  "80×25 character display"),
-            ("CLI Interface",  "pierre / suppiere commands"),
-            ("Memory Manager", "PMM + kernel heap"),
-            ("In-Memory FS",   "mkdir / touch / write / cat"),
-            ("Text UI",        "pierre tui — W/S/Enter/F1–F3"),
-            ("Text Editor",    "pierre edit <file> — F9/F10"),
-            ("PS/2 Input",     "keyboard + mouse interrupts"),
-            ("PCI Scanning",   "AHCI controller detection"),
-        ]
-        for name, desc in features:
-            row = tk.Frame(fi, bg=BG_LIGHT)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=f"▸ {name}", bg=BG_LIGHT, fg=GREEN,
-                     font=("Courier New", 9, "bold"), width=18, anchor="w").pack(side="left")
-            tk.Label(row, text=desc, bg=BG_LIGHT, fg=TEXT_SEC,
-                     font=("Courier New", 9), anchor="w").pack(side="left")
-
-        # -- controls panel ---------------------------------------------------
-        ctrl = tk.Frame(right, bg=BG_LIGHT, width=230)
-        ctrl.pack(fill="y", expand=True)
-        ctrl.pack_propagate(False)
-
-        tk.Label(ctrl, text="  CONTROLS", bg=BG_LIGHT, fg=BLUE,
-                 font=("Courier New", 11, "bold"), anchor="w",
-                 pady=7, padx=6).pack(fill="x")
-        tk.Frame(ctrl, bg=BORDER, height=1).pack(fill="x")
-
-        inner = tk.Frame(ctrl, bg=BG_LIGHT)
-        inner.pack(fill="both", expand=True, padx=14, pady=12)
-
-        self.launch_btn = tk.Button(
-            inner, text="▶  LAUNCH",
-            bg=BLUE, fg="#fff", font=("Courier New", 14, "bold"),
-            relief="flat", cursor="hand2", padx=20, pady=12,
-            activebackground="#79b8ff", command=self._launch_qemu)
-        self.launch_btn.pack(fill="x", pady=(0, 8))
+        self.boot_btn = tk.Button(
+            bar, text="  ▶  Boot OS  ",
+            bg=GREEN, fg="#000", font=BOLD,
+            relief="flat", cursor="hand2",
+            activebackground="#2ea043", activeforeground="#000",
+            command=self._boot)
+        self.boot_btn.pack(side="left", padx=(14, 6), pady=10)
 
         self.stop_btn = tk.Button(
-            inner, text="■  STOP",
-            bg=RED, fg="#fff", font=("Courier New", 11, "bold"),
-            relief="flat", cursor="hand2", padx=20, pady=8,
-            activebackground="#ff6b6b", state="disabled",
-            command=self._stop_qemu)
-        self.stop_btn.pack(fill="x", pady=(0, 18))
+            bar, text="  ■  Stop  ",
+            bg=SURFACE, fg=RED, font=BOLD,
+            relief="flat", cursor="hand2",
+            activebackground=BORDER, activeforeground=RED,
+            state="disabled", command=self._stop)
+        self.stop_btn.pack(side="left", pady=10)
 
-        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(0, 10))
+        self.clock = tk.Label(bar, text="", bg=PANEL, fg=MUTED, font=MONO)
+        self.clock.pack(side="right", padx=14)
+        self._tick()
 
-        # QEMU hotkeys
-        tk.Label(inner, text="QEMU HOTKEYS", bg=BG_LIGHT, fg=TEXT_SEC,
-                 font=("Courier New", 8, "bold")).pack(anchor="w")
-        for key, desc in [("Ctrl+Alt+G", "Release mouse"),
-                           ("Ctrl+Alt+F", "Fullscreen"),
-                           ("Ctrl+Alt+Q", "Quit QEMU")]:
-            row = tk.Frame(inner, bg=BG_LIGHT)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=key, bg=BORDER, fg=YELLOW,
-                     font=("Courier New", 8, "bold"), padx=4, pady=1).pack(side="left")
-            tk.Label(row, text=f"  {desc}", bg=BG_LIGHT, fg=TEXT_SEC,
-                     font=("Courier New", 8)).pack(side="left")
+        self.pill = tk.Label(bar, text=" ● Idle ", bg=SURFACE, fg=MUTED,
+                             font=SMALL, padx=6, pady=2)
+        self.pill.pack(side="right", padx=(0, 10))
 
-        tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(10, 8))
+    def _tick(self):
+        self.clock.configure(text=time.strftime("  %H:%M:%S   %Y-%m-%d  "))
+        self.after(1000, self._tick)
 
-        # CLI quick-ref
-        tk.Label(inner, text="CLI QUICK REF", bg=BG_LIGHT, fg=TEXT_SEC,
-                 font=("Courier New", 8, "bold")).pack(anchor="w")
-        for cmd in ["pierre help", "pierre dir", "pierre tui",
-                    "pierre edit <file>", "suppiere gfx"]:
-            tk.Label(inner, text=f"> {cmd}", bg=BG_LIGHT, fg=GREEN,
-                     font=("Courier New", 8), anchor="w").pack(fill="x", pady=1)
+    # ---- workspace ----------------------------------------------------------
 
-    # =========================================================================
-    # Tab: Config
-    # =========================================================================
+    def _workspace(self):
+        self.nb = ttk.Notebook(self, style="OS.TNotebook")
+        self.nb.pack(fill="both", expand=True)
 
-    def _tab_config(self, parent):
-        wrap = tk.Frame(parent, bg=BG_MID)
-        wrap.pack(fill="both", expand=True, padx=20, pady=15)
+        self.console  = ConsoleTab(self.nb)
+        self.nb.add(self.console,  text="  Console  ")
 
-        # memory
-        mc, mi = _card(wrap, "MEMORY")
-        mc.pack(fill="x", pady=(0, 10))
-        tk.Label(mi, text="RAM (MB):", bg=BG_LIGHT, fg=TEXT_PRI,
-                 font=("Courier New", 10)).pack(side="left")
-        tk.Spinbox(mi, from_=64, to=4096, increment=64,
-                   textvariable=self.memory_mb, width=7,
-                   bg=BG_DARK, fg=TEXT_PRI, font=("Courier New", 10),
-                   insertbackground=TEXT_PRI, buttonbackground=BG_LIGHT,
-                   relief="flat").pack(side="left", padx=(10, 0))
-        tk.Label(mi, text="(default: 128 MB)", bg=BG_LIGHT, fg=TEXT_SEC,
-                 font=("Courier New", 9)).pack(side="left", padx=(12, 0))
+        self.files    = FilesTab(self.nb)
+        self.nb.add(self.files,    text="  Files  ")
 
-        # display
-        dc, di = _card(wrap, "DISPLAY BACKEND")
-        dc.pack(fill="x", pady=(0, 10))
-        for label, val in [("SDL (default)", "sdl"),
-                            ("GTK",          "gtk"),
-                            ("VNC :0",       "vnc"),
-                            ("None",         "none")]:
-            ttk.Radiobutton(di, text=label, variable=self.display_mode,
-                            value=val, style="Dark.TRadiobutton").pack(
-                                side="left", padx=(0, 14))
+        self.settings = SettingsTab(self.nb, self)
+        self.nb.add(self.settings, text="  Settings  ")
 
-        # extra flags
-        ec, ei = _card(wrap, "EXTRA QEMU FLAGS")
-        ec.pack(fill="x", pady=(0, 10))
-        tk.Label(ei, text="Flags:", bg=BG_LIGHT, fg=TEXT_PRI,
-                 font=("Courier New", 10)).pack(side="left")
-        tk.Entry(ei, textvariable=self.extra_flags, width=52,
-                 bg=BG_DARK, fg=TEXT_PRI, font=("Courier New", 10),
-                 insertbackground=TEXT_PRI, relief="flat").pack(
-                     side="left", padx=(10, 0))
-
-        # command preview
-        pvc, pvi = _card(wrap, "COMMAND PREVIEW")
-        pvc.pack(fill="x")
-        self.cmd_preview = tk.Text(pvi, height=3, bg=BG_DARK, fg=GREEN,
-                                   font=("Courier New", 9), relief="flat",
-                                   state="disabled")
-        self.cmd_preview.pack(fill="x")
-        tk.Button(pvi, text="Refresh", bg=BG_LIGHT, fg=TEXT_SEC,
-                  font=("Courier New", 9), relief="flat", cursor="hand2",
-                  activebackground=BORDER,
-                  command=self._refresh_preview).pack(anchor="e", pady=(6, 0))
-        self._refresh_preview()
-
-    # =========================================================================
-    # Tab: Output
-    # =========================================================================
-
-    def _tab_output(self, parent):
-        wrap = tk.Frame(parent, bg=BG_MID)
-        wrap.pack(fill="both", expand=True, padx=15, pady=15)
-
-        hdr = tk.Frame(wrap, bg=BG_MID)
-        hdr.pack(fill="x", pady=(0, 6))
-        tk.Label(hdr, text="QEMU OUTPUT", bg=BG_MID, fg=BLUE,
-                 font=("Courier New", 11, "bold")).pack(side="left")
-        tk.Button(hdr, text="Clear", bg=BG_LIGHT, fg=TEXT_SEC,
-                  font=("Courier New", 9), relief="flat", cursor="hand2",
-                  activebackground=BORDER,
-                  command=self._clear_output).pack(side="right")
-
-        self.output_text = tk.Text(wrap, bg="#0d1117", fg=GREEN,
-                                   font=("Courier New", 10), relief="flat",
-                                   padx=8, pady=6, state="disabled",
-                                   insertbackground=GREEN,
-                                   selectbackground=BG_LIGHT)
-        sb = ttk.Scrollbar(wrap, orient="vertical",
-                           command=self.output_text.yview)
-        self.output_text.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.output_text.pack(side="left", fill="both", expand=True)
-        self._append_output("NewDOS Launcher ready — press LAUNCH to boot the kernel.\n")
-
-    # =========================================================================
-    # Tab: About
-    # =========================================================================
-
-    def _tab_about(self, parent):
-        wrap = tk.Frame(parent, bg=BG_MID)
-        wrap.pack(fill="both", expand=True, padx=20, pady=15)
-
-        # ASCII logo
-        lc, li = _card(wrap, "")
-        lc.pack(fill="x", pady=(0, 10))
-        ascii_logo = (
-            "  ███╗   ██╗███████╗██╗    ██╗██████╗  ██████╗ ███████╗\n"
-            "  ████╗  ██║██╔════╝██║    ██║██╔══██╗██╔═══██╗██╔════╝\n"
-            "  ██╔██╗ ██║█████╗  ██║ █╗ ██║██║  ██║██║   ██║███████╗\n"
-            "  ██║╚██╗██║██╔══╝  ██║███╗██║██║  ██║██║   ██║╚════██║\n"
-            "  ██║ ╚████║███████╗╚███╔███╔╝██████╔╝╚██████╔╝███████║\n"
-            "  ╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝ ╚═════╝  ╚═════╝ ╚══════╝"
+        self.console.write(
+            "NewDOS Desktop  —  x86_64 bare-metal OS\n"
+            "────────────────────────────────────────\n"
+            "Press  ▶ Boot OS  to start the kernel in QEMU.\n\n"
+            "Inside the kernel:\n"
+            "  pierre help          list all commands\n"
+            "  pierre tui           text desktop UI  (W/S navigate, Enter open)\n"
+            "  pierre edit <file>   editor  (F9 save, F10 exit)\n"
+            "  suppiere gfx         graphics demo\n\n"
         )
-        tk.Label(lc, text=ascii_logo, bg=BG_LIGHT, fg=BLUE,
-                 font=("Courier New", 7, "bold"), justify="left").pack(
-                     padx=12, pady=(4, 2))
-        tk.Label(lc, text="  Base Kernel  |  x86_64 bare-metal OS  |  Built with Rust",
-                 bg=BG_LIGHT, fg=TEXT_SEC,
-                 font=("Courier New", 9)).pack(pady=(0, 6))
 
-        # Info grid
-        ic, ii = _card(wrap, "PROJECT INFO")
-        ic.pack(fill="x", pady=(0, 10))
-        for label, value in [
-            ("Architecture",   "x86_64 (bare metal, ring 0)"),
-            ("Language",       "Rust 2021 — nightly toolchain"),
-            ("Bootloader",     "bootloader v0.9 — BIOS only"),
-            ("Display",        "VGA text mode (80×25) + framebuffer"),
-            ("Input",          "PS/2 keyboard + mouse (IRQ-driven)"),
-            ("Memory",         "Physical memory manager + kernel heap"),
-            ("Filesystem",     "In-memory (no disk driver yet)"),
-            ("Latest version", "v0.1.3"),
-        ]:
-            row = tk.Frame(ii, bg=BG_LIGHT)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, bg=BG_LIGHT, fg=TEXT_SEC,
-                     font=("Courier New", 9), width=20, anchor="w").pack(side="left")
-            tk.Label(row, text=value, bg=BG_LIGHT, fg=TEXT_PRI,
-                     font=("Courier New", 9), anchor="w").pack(side="left")
-
-        # Build instructions
-        bc, bi = _card(wrap, "BUILD FROM SOURCE")
-        bc.pack(fill="x")
-        build_cmds = (
-            "rustup default nightly\n"
-            "rustup target add x86_64-unknown-none\n"
-            "cargo install bootimage\n"
-            "cargo bootimage\n"
-            "qemu-system-x86_64 -drive format=raw,"
-            "file=target/x86_64-newdos/debug/bootimage-NewDOS-CLI-Operating-System.bin"
-        )
-        bt = tk.Text(bi, height=5, bg=BG_DARK, fg=GREEN,
-                     font=("Courier New", 9), relief="flat", padx=8, pady=6)
-        bt.insert("1.0", build_cmds)
-        bt.configure(state="disabled")
-        bt.pack(fill="x")
-
-    # =========================================================================
-    # Status bar
-    # =========================================================================
+    # ---- status bar ---------------------------------------------------------
 
     def _statusbar(self):
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", side="bottom")
-        bar = tk.Frame(self, bg=BG_MID)
-        bar.pack(fill="x", side="bottom")
-        self.status_lbl = tk.Label(bar, text="● Ready", bg=BG_MID, fg=GREEN,
-                                   font=("Courier New", 9), anchor="w",
-                                   padx=12, pady=4)
-        self.status_lbl.pack(side="left")
-        self.qemu_lbl = tk.Label(bar, text="", bg=BG_MID, fg=TEXT_SEC,
-                                 font=("Courier New", 9), anchor="e",
-                                 padx=12, pady=4)
-        self.qemu_lbl.pack(side="right")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+        bar = tk.Frame(self, bg=PANEL)
+        bar.pack(fill="x")
+        self.status = tk.Label(bar, text="Ready", bg=PANEL, fg=MUTED,
+                               font=SMALL, anchor="w", padx=12, pady=3)
+        self.status.pack(side="left")
+        ok  = bool(shutil.which("qemu-system-x86_64"))
+        txt = "qemu ✓" if ok else "qemu not found — sudo apt install qemu-system-x86"
+        tk.Label(bar, text=txt, bg=PANEL, fg=GREEN if ok else RED,
+                 font=SMALL, padx=12, pady=3).pack(side="right")
 
-    # =========================================================================
-    # Logic helpers
-    # =========================================================================
+    # ---- boot logic ---------------------------------------------------------
 
-    def _check_qemu(self):
-        if shutil.which("qemu-system-x86_64"):
-            self.qemu_lbl.configure(text="qemu-system-x86_64 ✓", fg=GREEN)
-        else:
-            self.qemu_lbl.configure(text="qemu-system-x86_64 not found", fg=RED)
-
-    def _bin_path(self):
-        ver  = self.selected_version.get()           # e.g. "v0.1.3"
-        name = "NewDOSv" + ver[1:].replace(".", "_") + ".bin"
-        return BASE_DIR / name
-
-    def _build_cmd(self):
-        cmd = [
-            "qemu-system-x86_64",
-            "-drive", f"format=raw,file={self._bin_path()}",
-            "-m", str(self.memory_mb.get()),
-            "-display", self.display_mode.get(),
-        ]
-        extra = self.extra_flags.get().strip()
-        if extra:
-            cmd.extend(extra.split())
-        return cmd
-
-    def _refresh_preview(self):
-        preview = " ".join(str(c) for c in self._build_cmd())
-        self.cmd_preview.configure(state="normal")
-        self.cmd_preview.delete("1.0", "end")
-        self.cmd_preview.insert("1.0", preview)
-        self.cmd_preview.configure(state="disabled")
-
-    def _launch_qemu(self):
-        bp = self._bin_path()
-        if not bp.exists():
-            messagebox.showerror("File Not Found", f"Kernel binary not found:\n{bp}")
+    def _boot(self):
+        ver = self.version_var.get()
+        bp  = KERNELS.get(ver)
+        if not bp or not bp.exists():
+            messagebox.showerror("Kernel Not Found",
+                                 f"Binary not found:\n{bp}\n\nBuild with: cargo bootimage")
             return
         if not shutil.which("qemu-system-x86_64"):
-            messagebox.showerror(
-                "QEMU Not Found",
-                "qemu-system-x86_64 is not installed.\n\n"
-                "Install with:  sudo apt install qemu-system-x86")
+            messagebox.showerror("QEMU Not Found",
+                                 "Install with:  sudo apt install qemu-system-x86")
             return
 
-        cmd = self._build_cmd()
-        self._append_output(f"\n$ {' '.join(str(c) for c in cmd)}\n")
-        self._set_status("● Running", YELLOW)
+        splash = BootSplash(self, ver)
+        self.wait_window(splash)
+
+        cmd = ["qemu-system-x86_64",
+               "-drive", f"format=raw,file={bp}",
+               "-m", str(self.memory_var.get()),
+               "-display", self.display_var.get()]
+        extra = self.flags_var.get().strip()
+        if extra:
+            cmd.extend(extra.split())
+
+        self._set_running(True)
+        self.status.configure(text=f"Running {ver}…")
+        self.nb.select(self.console)
+        self.console.write(f"$ {' '.join(str(c) for c in cmd)}\n\n")
 
         try:
             self.process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
         except Exception as exc:
-            self._append_output(f"Error: {exc}\n")
-            self._set_status("● Error", RED)
+            self.console.write(f"Error: {exc}\n")
+            self._set_running(False)
+            self.status.configure(text="Launch failed")
             return
 
-        self.launch_btn.configure(state="disabled")
-        self.stop_btn  .configure(state="normal")
-
-        threading.Thread(target=self._stream_output, daemon=True).start()
+        threading.Thread(target=self._stream, daemon=True).start()
         self.after(500, self._poll)
 
-    def _stream_output(self):
+    def _stream(self):
         try:
             for line in self.process.stdout:
-                self.after(0, self._append_output, line)
+                self.after(0, self.console.write, line)
         except Exception:
             pass
 
     def _poll(self):
         if self.process and self.process.poll() is not None:
             rc = self.process.returncode
-            self._append_output(f"\nProcess exited (code {rc})\n")
-            self._set_status("● Ready", GREEN)
-            self.launch_btn.configure(state="normal")
-            self.stop_btn  .configure(state="disabled")
+            self.console.write(f"\n── QEMU exited (code {rc}) ──\n")
+            self._set_running(False)
+            self.status.configure(text="Ready")
             self.process = None
         elif self.process:
             self.after(500, self._poll)
 
-    def _stop_qemu(self):
+    def _stop(self):
         if self.process:
             self.process.terminate()
-            self._append_output("\n[Stopped by user]\n")
-            self._set_status("● Ready", GREEN)
-            self.launch_btn.configure(state="normal")
-            self.stop_btn  .configure(state="disabled")
+            self.console.write("\n── Stopped ──\n")
+            self._set_running(False)
+            self.status.configure(text="Ready")
             self.process = None
 
-    def _append_output(self, text):
-        self.output_text.configure(state="normal")
-        self.output_text.insert("end", text)
-        self.output_text.see("end")
-        self.output_text.configure(state="disabled")
+    def _set_running(self, running):
+        if running:
+            self.boot_btn.configure(state="disabled", bg=SURFACE, fg=MUTED)
+            self.stop_btn.configure(state="normal",   bg=RED,     fg=WHITE)
+            self.pill.configure(text=" ● Running ", bg=GREEN, fg="#000")
+        else:
+            self.boot_btn.configure(state="normal",   bg=GREEN,   fg="#000")
+            self.stop_btn.configure(state="disabled", bg=SURFACE, fg=MUTED)
+            self.pill.configure(text=" ● Idle ", bg=SURFACE, fg=MUTED)
 
-    def _clear_output(self):
-        self.output_text.configure(state="normal")
-        self.output_text.delete("1.0", "end")
-        self.output_text.configure(state="disabled")
-
-    def _set_status(self, text, colour):
-        self.status_lbl.configure(text=text, fg=colour)
+    def _on_close(self):
+        if self.process:
+            self.process.terminate()
+        self.destroy()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    app = NewDOSLauncher()
-    app.mainloop()
+    NewDOSDesktop().mainloop()
 
 
 if __name__ == "__main__":

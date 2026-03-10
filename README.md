@@ -68,30 +68,28 @@ In settings, **Q/E** adjust the timezone and the console accepts `user <name>` a
 
 The editor uses **F9** to save and **F10** to exit.
 
-## GUI Launcher
+## GUI Desktop
 
 ```bash
 pierre gui
 ```
 
-That's it. The `pierre` script in the repo root mirrors the in-kernel command prefix on your host machine.
-
-`pierre gui` will use the pre-compiled `NewDOSLauncher.bin` if present, and fall back to the Python source in `gui/` automatically.
+Install `pierre` system-wide once so you never need `./`:
 
 ```bash
-# make pierre executable once
-chmod +x pierre
-
-# then just run
-./pierre gui
+sudo cp pierre /usr/local/bin/pierre
+sudo chmod +x /usr/local/bin/pierre
 ```
 
-**Features of the launcher:**
+Then from any directory just type `pierre gui` to launch the full desktop environment.
 
-- **Launch tab** — pick kernel version (v0.1.2 / v0.1.3), one-click LAUNCH / STOP
-- **Config tab** — set RAM amount, QEMU display backend, extra flags, live command preview
-- **Output tab** — live QEMU stdout/stderr feed with a clear button
-- **About tab** — project info, ASCII logo, build-from-source instructions
+`pierre gui` uses the pre-compiled `NewDOSLauncher.bin` automatically, falling back to the Python source in `gui/` if the binary is missing.
+
+**Desktop tabs:**
+
+- **Console** — live QEMU output with boot animation when OS starts
+- **Files** — file manager browsing the repo directory
+- **Settings** — kernel version, RAM, display backend, extra QEMU flags
 
 Requires `qemu-system-x86_64` on your PATH (`sudo apt install qemu-system-x86`).
 
